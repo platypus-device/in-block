@@ -1,20 +1,51 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# INBLOCK
 
-# Run and deploy your AI Studio app
+A node-based infinite canvas for chaining AI prompts. Connect text blocks to build context and generate responses using Gemini and other models.
 
-This contains everything you need to run your app locally.
+**Deployed at:** [in-block.vercel.app](https://in-block.vercel.app)
 
-View your app in AI Studio: https://ai.studio/apps/drive/1q1jfOS4vs_zo1LFEmixs1pvxtexxnc1F
+## ✨ Features
 
-## Run Locally
+- **Infinite Canvas:** Organize your AI workflows visually without boundaries.
+- **Smart Connections:** Link blocks together to pass context seamlessly.
+- **Multi-Model Support:** Configure and use models from Gemini, OpenAI, and more.
+- **Node-Based Workflow:** Add text and image blocks, group them, and organize with auto-layout.
+- **Context Management:** Inspect the exact prompt sent to the AI and merge results.
+- **Customizable UI:** Support for dark mode and glassmorphism styling.
 
-**Prerequisites:**  Node.js
+## 🚀 Getting Started
 
+### Prerequisites
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+- [Node.js](https://nodejs.org/) (v18 or higher recommended)
+- An API Key for [Google Gemini](https://aistudio.google.com/app/apikey)
+
+### Local Development
+
+1. **Clone the repository:**
+   ```bash
+   git clone <your-repo-url>
+   cd block
+   ```
+
+2. **Install dependencies:**
+   ```bash
+   npm install
+   ```
+
+3. **Start the development server:**
+   ```bash
+   npm run dev
+   ```
+
+4. **Configure API Keys:**
+   Open the app in your browser, click the **Settings** (gear icon) at the bottom left, and enter your Gemini API key.
+
+## 🛠️ Tech Stack
+
+- **Framework:** [React 19](https://react.dev/)
+- **Bundler:** [Vite](https://vitejs.dev/)
+- **Styling:** [Tailwind CSS](https://tailwindcss.com/)
+- **Icons:** [Lucide React](https://lucide.dev/)
+- **AI Integration:** [@google/genai](https://www.npmjs.com/package/@google/genai)
+

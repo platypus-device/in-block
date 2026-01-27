@@ -1,6 +1,6 @@
 
 {
-  "name": "Block",
+  "name": "INBLOCK",
   "description": "A node-based infinite canvas for chaining AI prompts. Connect text blocks to build context and generate responses using Gemini.",
   "requestFramePermissions": []
 }
