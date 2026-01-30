@@ -15,6 +15,7 @@ export interface AIModel {
 
 export interface GenerationOptions {
     temperature?: number;
+    signal?: AbortSignal;
 }
 
 /**
@@ -79,7 +80,7 @@ const generateGeminiContent = async (
             requestPayload.generationConfig = { temperature: options.temperature ?? 0.7 };
         }
 
-        const response = await ai.models.generateContent(requestPayload);
+        const response = await ai.models.generateContent(requestPayload, { signal: options.signal });
         const parts: GeneratedPart[] = [];
         if (response.candidates?.[0]?.content?.parts) {
             for (const part of response.candidates[0].content.parts) {
@@ -135,7 +136,8 @@ const generateOpenAIContent = async (
                 'Authorization': `Bearer ${apiKey}`,
                 'Content-Type': 'application/json',
             },
-            body: JSON.stringify(body)
+            body: JSON.stringify(body),
+            signal: options.signal
         });
 
         if (!response.ok) {
@@ -200,7 +202,8 @@ const generateAnthropicContent = async (
                 'Content-Type': 'application/json',
                 'dangerously-allow-browser': 'true' // In some environments
             } as any,
-            body: JSON.stringify(body)
+            body: JSON.stringify(body),
+            signal: options.signal
         });
 
         if (!response.ok) {

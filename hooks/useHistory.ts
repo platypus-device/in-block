@@ -35,7 +35,7 @@ export const useHistory = (
         }
 
         historyRef.current.push(snapshot);
-        if (historyRef.current.length > 50) historyRef.current.shift();
+        if (historyRef.current.length > 20) historyRef.current.shift();
         redoStackRef.current = [];
 
         setCanUndo(true);

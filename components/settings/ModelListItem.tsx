@@ -27,8 +27,46 @@ export const ModelListItem: React.FC<ModelListItemProps> = ({
     handleDragEnd,
     handleDeleteModel
 }) => {
-    // Helper to extract nice preview info from config
-    const temp = model.config?.temperature;
+    const renderConfigParams = (config: any) => {
+        const params: { key: string, value?: string }[] = [];
+
+        const traverse = (obj: any) => {
+            for (const key in obj) {
+                const val = obj[key];
+                if (val === null || val === undefined) continue;
+                
+                if (Array.isArray(val)) {
+                    // Recursively traverse array items to find nested keys (e.g. tools -> google_search)
+                    val.forEach(item => {
+                        if (typeof item === 'object' && item !== null) {
+                            traverse(item);
+                        } else {
+                            // If it's a simple string in an array, treat it as a key tag
+                            params.push({ key: String(item) });
+                        }
+                    });
+                } else if (typeof val === 'object') {
+                    // Check if it's an empty object (like google_search: {})
+                    if (Object.keys(val).length === 0) {
+                         params.push({ key });
+                    } else {
+                        traverse(val);
+                    }
+                } else {
+                    params.push({ key, value: String(val) });
+                }
+            }
+        };
+
+        traverse(config);
+        
+        return params.map((param, idx) => (
+            <span key={idx} className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] border ${isDarkMode ? 'bg-blue-500/10 border-blue-500/20 text-blue-200' : 'bg-blue-50 border-blue-100 text-blue-700'}`}>
+                <span className="font-semibold">{param.key}</span>
+                {param.value && <span className="opacity-70 font-light border-l border-current pl-1 ml-0.5">{param.value}</span>}
+            </span>
+        ));
+    };
 
     return (
         <div
@@ -50,11 +88,9 @@ export const ModelListItem: React.FC<ModelListItemProps> = ({
                             <span className="text-[10px] opacity-40 font-mono truncate max-w-[150px]">{model.value}</span>
                         )}
                     </div>
-                    <div className="text-[9px] opacity-50 font-mono flex items-center gap-2">
-                        {model.type === 'image' ? (
-                            <span>Configurable</span>
-                        ) : (
-                            <span>Temp: {temp !== undefined ? temp : 'Default'}</span>
+                    <div className="flex flex-wrap gap-1.5 mt-1">
+                        {model.config && Object.keys(model.config).length > 0 ? renderConfigParams(model.config) : (
+                            <span className="text-[9px] opacity-40 italic">Default Config</span>
                         )}
                     </div>
                 </div>

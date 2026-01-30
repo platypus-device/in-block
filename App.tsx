@@ -1,4 +1,3 @@
-
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { ZoomIn, ZoomOut, Settings, X, Undo2, Redo2, Download, Upload, Merge } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
@@ -10,6 +9,7 @@ import { SettingsModal } from './components/SettingsModal';
 import { generateContent } from './services/ai';
 import { useHistory } from './hooks/useHistory';
 import { useViewport } from './hooks/useViewport';
+import { deleteMultipleImages, getImage, getImageBlob, saveImage } from './services/imageDb';
 import {
     getCanvasPos,
     getHandlePosition,
@@ -24,21 +24,40 @@ const NODE_WIDTH = 300;
 
 const App: React.FC = () => {
     // --- State ---
-    const [nodes, setNodes] = useState<NodeData[]>([
-        {
-            id: '1',
-            type: 'text',
-            source: 'user',
-            content: '讲个100字以内的笑话',
-            position: { x: 100, y: 100 },
-            width: NODE_WIDTH,
-            height: 150,
-            ports: [uuidv4()],
-            model: 'gemini-2.0-flash'
-        },
-    ]);
-    const [edges, setEdges] = useState<EdgeData[]>([]);
-    const [groups, setGroups] = useState<GroupData[]>([]);
+    const [nodes, setNodes] = useState<NodeData[]>(() => {
+        const saved = localStorage.getItem('canvas_nodes');
+        if (saved) {
+            try {
+                return JSON.parse(saved);
+            } catch (e) {
+                console.error("Failed to parse saved nodes", e);
+            }
+        }
+        return [
+            {
+                id: '1',
+                type: 'text',
+                source: 'user',
+                content: '讲个100字以内的笑话',
+                position: { 
+                    x: (window.innerWidth - NODE_WIDTH) / 2, 
+                    y: (window.innerHeight - 150) / 2 
+                },
+                width: NODE_WIDTH,
+                height: 150,
+                ports: [uuidv4()],
+                model: ''
+            },
+        ];
+    });
+    const [edges, setEdges] = useState<EdgeData[]>(() => {
+        const saved = localStorage.getItem('canvas_edges');
+        return saved ? JSON.parse(saved) : [];
+    });
+    const [groups, setGroups] = useState<GroupData[]>(() => {
+        const saved = localStorage.getItem('canvas_groups');
+        return saved ? JSON.parse(saved) : [];
+    });
 
 
     // Canvas Viewport State
@@ -50,6 +69,34 @@ const App: React.FC = () => {
         handleWheel
     } = useViewport();
 
+    // Auto-Save & Restore Logic
+    useEffect(() => {
+        const savedOffset = localStorage.getItem('canvas_offset');
+        const savedScale = localStorage.getItem('canvas_scale');
+        if (savedOffset) {
+            try {
+                setOffset(JSON.parse(savedOffset));
+            } catch (e) { console.error(e); }
+        }
+        if (savedScale) {
+            try {
+                setScale(JSON.parse(savedScale));
+            } catch (e) { console.error(e); }
+        }
+    }, [setOffset, setScale]);
+
+    useEffect(() => {
+        const saveData = () => {
+            localStorage.setItem('canvas_nodes', JSON.stringify(nodes));
+            localStorage.setItem('canvas_edges', JSON.stringify(edges));
+            localStorage.setItem('canvas_groups', JSON.stringify(groups));
+            localStorage.setItem('canvas_offset', JSON.stringify(offset));
+            localStorage.setItem('canvas_scale', JSON.stringify(scale));
+        };
+        const timer = setTimeout(saveData, 2000);
+        return () => clearTimeout(timer);
+    }, [nodes, edges, groups, offset, scale]);
+
     const [isDarkMode, setIsDarkMode] = useState(true);
 
     // Keep a ref to nodes/edges/groups for async/event access without triggering re-renders or dependency updates
@@ -59,10 +106,81 @@ const App: React.FC = () => {
 
     // Ref for mouse position to avoid re-binding keyboard/paste events on mousemove
     const mousePosRef = useRef<Position>({ x: 0, y: 0 });
+    const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
 
     useEffect(() => { nodesRef.current = nodes; }, [nodes]);
     useEffect(() => { edgesRef.current = edges; }, [edges]);
     useEffect(() => { groupsRef.current = groups; }, [groups]);
+
+    // Auto-restore images from IndexedDB on app load or when nodes change
+    useEffect(() => {
+        const restoreImages = async () => {
+            // Preload images that are referenced in nodes
+            const imageIds = new Set<string>();
+            nodes.forEach(node => {
+                if (node.imageId) {
+                    imageIds.add(node.imageId);
+                }
+            });
+            
+            // Try to load each image to trigger caching in browser
+            for (const imageId of imageIds) {
+                try {
+                    await getImage(imageId);
+                } catch (err) {
+                    console.error(`Failed to preload image ${imageId}:`, err);
+                }
+            }
+        };
+        
+        restoreImages();
+    }, [nodes]);
+
+    // Migrate existing Base64 images from node.content to IndexedDB on app load
+    useEffect(() => {
+        const migrateBase64Images = async () => {
+            const migratedNodes = [...nodes];
+            let hasChanges = false;
+
+            for (let i = 0; i < migratedNodes.length; i++) {
+                const node = migratedNodes[i];
+                // Check if node has Base64 image data in content and no imageId yet
+                if (!node.imageId && node.content.startsWith('data:image/')) {
+                    const mimeMatch = node.content.match(/^data:(image\/[a-z\+]+);base64,/);
+                    const mimeType = mimeMatch ? mimeMatch[1] : 'image/png';
+                    const base64Match = node.content.match(/^data:image\/[a-z\+]+;base64,(.+)$/);
+
+                    if (base64Match) {
+                        const imageId = uuidv4();
+                        try {
+                            await saveImage(imageId, base64Match[1], mimeType);
+                            migratedNodes[i] = {
+                                ...node,
+                                imageId,
+                                imageMimeType: mimeType,
+                                content: '' // Clear Base64 from content
+                            };
+                            hasChanges = true;
+                        } catch (err) {
+                            console.error(`Failed to migrate image for node ${node.id}:`, err);
+                        }
+                    }
+                }
+            }
+
+            if (hasChanges) {
+                setNodes(migratedNodes);
+            }
+        };
+
+        // Only run migration on first load
+        const migrationFlag = localStorage.getItem('images_migrated_to_indexeddb');
+        if (!migrationFlag) {
+            migrateBase64Images().then(() => {
+                localStorage.setItem('images_migrated_to_indexeddb', 'true');
+            });
+        }
+    }, []); // Run only once on mount
 
     // --- AI Configuration State ---
     const [providerConfigs, setProviderConfigs] = useState<Record<ProviderType, ProviderConfig>>({
@@ -147,6 +265,41 @@ const App: React.FC = () => {
     const [renameGroupModal, setRenameGroupModal] = useState<{ isOpen: boolean; groupId: string; currentTitle: string } | null>(null);
     const [imageModal, setImageModal] = useState<string | null>(null);
 
+    // --- File System Handle State ---
+    const [fileHandle, setFileHandle] = useState<any>(null); // FileSystemFileHandle
+    const [isAutoSaving, setIsAutoSaving] = useState(false);
+
+    // Auto-Save to File Handle
+    useEffect(() => {
+        if (!fileHandle) return;
+
+        const saveToFile = async () => {
+            try {
+                setIsAutoSaving(true);
+                const data = {
+                    nodes,
+                    edges,
+                    groups,
+                    offset,
+                    scale,
+                    providerConfigs,
+                    version: "1.1"
+                };
+                
+                const writable = await fileHandle.createWritable();
+                await writable.write(JSON.stringify(data, null, 2));
+                await writable.close();
+                setIsAutoSaving(false);
+            } catch (err) {
+                console.error("Auto-save failed", err);
+                setIsAutoSaving(false);
+            }
+        };
+
+        const timer = setTimeout(saveToFile, 1000);
+        return () => clearTimeout(timer);
+    }, [nodes, edges, groups, offset, scale, fileHandle, providerConfigs]);
+
     const canvasRef = useRef<HTMLDivElement>(null);
     const loadCanvasInputRef = useRef<HTMLInputElement>(null);
 
@@ -205,6 +358,24 @@ const App: React.FC = () => {
         return { edges: ancestorEdgeIds, ports: portIds };
     }, [selectedNodeIds, nodes, edges]);
 
+    const draggingNodeIds = useMemo(() => {
+        if (!isDraggingNodes) return new Set<string>();
+        const ids = new Set(selectedNodeIds);
+        if (selectedGroupId) {
+            const group = groups.find(g => g.id === selectedGroupId);
+            if (group) {
+                group.nodeIds.forEach(id => ids.add(id));
+            }
+        }
+        return ids;
+    }, [isDraggingNodes, selectedNodeIds, selectedGroupId, groups]);
+
+    const nodeMap = useMemo(() => {
+        const map = new Map<string, NodeData>();
+        nodes.forEach(n => map.set(n.id, n));
+        return map;
+    }, [nodes]);
+
     // --- History Logic ---
     const { saveHistory, handleUndo, handleRedo, canUndo, canRedo } = useHistory(
         nodes,
@@ -223,6 +394,24 @@ const App: React.FC = () => {
         saveHistory();
         const result = calculateDeletionEffects(nodesRef.current, edgesRef.current, groupsRef.current, ids);
 
+        // Cancel any pending generations and delete associated images
+        const imagesToDelete: string[] = [];
+        ids.forEach(id => {
+            // Cancel pending generation
+            if (abortControllersRef.current.has(id)) {
+                abortControllersRef.current.get(id)?.abort();
+                abortControllersRef.current.delete(id);
+            }
+
+            const node = nodesRef.current.find(n => n.id === id);
+            if (node && node.imageId) {
+                imagesToDelete.push(node.imageId);
+            }
+        });
+        if (imagesToDelete.length > 0) {
+            deleteMultipleImages(imagesToDelete).catch(err => console.error('Failed to delete images:', err));
+        }
+
         setNodes(result.nodes);
         setEdges(result.edges);
         setGroups(result.groups);
@@ -231,11 +420,23 @@ const App: React.FC = () => {
         setContextMenu(null);
     }, [saveHistory]);
 
-    const handleToggleActive = (id: string) => {
+    const handleToggleActive = useCallback((id: string) => {
         saveHistory();
         setNodes(prev => prev.map(n => n.id === id ? { ...n, isInactive: !n.isInactive } : n));
         setContextMenu(null);
-    };
+    }, [saveHistory]);
+
+    const handleDeleteSingleNode = useCallback((id: string) => {
+        handleDeleteNodes([id]);
+    }, [handleDeleteNodes]);
+
+    const handleStartEdit = useCallback(() => {
+        saveHistory();
+    }, [saveHistory]);
+
+    const handleViewImage = useCallback((url: string) => {
+        setImageModal(url);
+    }, []);
 
     const handleCreateGroup = () => {
         saveHistory();
@@ -325,6 +526,50 @@ const App: React.FC = () => {
     };
 
     // --- Save / Load Canvas Logic ---
+    const handleOpenFile = async () => {
+        if ('showOpenFilePicker' in window) {
+            try {
+                const [handle] = await (window as any).showOpenFilePicker({
+                    types: [{
+                        description: 'Block Canvas Files',
+                        accept: { 'application/json': ['.json'] },
+                    }],
+                    multiple: false,
+                });
+                
+                const file = await handle.getFile();
+                const text = await file.text();
+                const data = JSON.parse(text);
+
+                if (!Array.isArray(data.nodes) || !Array.isArray(data.edges)) {
+                    alert("Invalid canvas file format.");
+                    return;
+                }
+
+                saveHistory();
+
+                setNodes(data.nodes);
+                setEdges(data.edges);
+                setGroups(data.groups || []);
+                if (data.offset) setOffset(data.offset);
+                if (data.scale) setScale(data.scale);
+
+                setSelectedNodeIds(new Set());
+                setSelectedGroupId(null);
+                setSelectedEdgeId(null);
+                
+                setFileHandle(handle);
+            } catch (err: any) {
+                if (err.name !== 'AbortError') {
+                    console.error(err);
+                    alert("Failed to open file.");
+                }
+            }
+        } else {
+            loadCanvasInputRef.current?.click();
+        }
+    };
+
     const handleSaveCanvas = () => {
         const data = {
             nodes: nodesRef.current,
@@ -332,13 +577,14 @@ const App: React.FC = () => {
             groups: groupsRef.current,
             offset,
             scale,
-            version: "1.0"
+            providerConfigs,
+            version: "1.1"
         };
         const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const link = document.createElement('a');
         link.href = url;
-        link.download = `gemini-canvas-${new Date().toISOString().slice(0, 10)}.json`;
+        link.download = `Block-Canvas-${new Date().getFullYear()}${(new Date().getMonth() + 1).toString().padStart(2, '0')}${new Date().getDate().toString().padStart(2, '0')}-${new Date().getHours().toString().padStart(2, '0')}${new Date().getMinutes().toString().padStart(2, '0')}.json`;
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
@@ -368,6 +614,11 @@ const App: React.FC = () => {
 
                 if (data.offset) setOffset(data.offset);
                 if (data.scale) setScale(data.scale);
+
+                // Restore provider configurations if available
+                if (data.providerConfigs) {
+                    setProviderConfigs(data.providerConfigs);
+                }
 
                 setSelectedNodeIds(new Set());
                 setSelectedGroupId(null);
@@ -418,110 +669,6 @@ const App: React.FC = () => {
 
         handleCancelMergeMode();
     };
-
-    // --- Keyboard Shortcuts ---
-    useEffect(() => {
-        const handleKeyDown = (e: KeyboardEvent) => {
-            if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
-                if (e.shiftKey) {
-                    handleRedo();
-                } else {
-                    handleUndo();
-                }
-                return;
-            }
-            if ((e.ctrlKey || e.metaKey) && e.key === 'y') {
-                handleRedo();
-                return;
-            }
-
-            if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-
-            if (e.key === 'Delete' || e.key === 'Backspace') {
-                if (isMergeMode) return;
-
-                if (selectedNodeIds.size > 0) {
-                    handleDeleteNodes(Array.from(selectedNodeIds));
-                } else if (selectedGroupId) {
-                    const group = groupsRef.current.find(g => g.id === selectedGroupId);
-                    if (group) handleDeleteNodes(group.nodeIds);
-                    setSelectedGroupId(null);
-                } else if (selectedEdgeId) {
-                    saveHistory();
-                    const newEdges = edgesRef.current.filter(edge => edge.id !== selectedEdgeId);
-                    setEdges(newEdges);
-                    setNodes(prevNodes => prevNodes.map(node => ({
-                        ...node,
-                        ports: getCleanedPorts(node, newEdges)
-                    })));
-                    setSelectedEdgeId(null);
-                }
-            }
-
-            if (e.key === 'Escape') {
-                if (isMergeMode) {
-                    handleCancelMergeMode();
-                } else {
-                    setContextMenu(null);
-                    setPromptModal(null);
-                    setRenameGroupModal(null);
-                    if (imageModal) setImageModal(null);
-                    if (selectionBox) setSelectionBox(null);
-                    setSelectedGroupId(null);
-                    setShowSettings(false);
-                    setSelectedNodeIds(new Set()); // Also clear selection on Escape
-                }
-            }
-        };
-
-        // ... Global Paste Logic
-        const handleGlobalPaste = (e: ClipboardEvent) => {
-            const target = e.target as HTMLElement;
-            if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return;
-
-            const items = e.clipboardData?.items;
-            if (!items) return;
-
-            // Use mousePosRef for current position without needing to be in dependency array
-            const currentMousePos = mousePosRef.current;
-
-            for (const item of items) {
-                if (item.type.startsWith('image/')) {
-                    e.preventDefault();
-                    const file = item.getAsFile();
-                    if (file) {
-                        saveHistory();
-                        const reader = new FileReader();
-                        reader.onload = (event) => {
-                            if (event.target?.result) {
-                                const newNode: NodeData = {
-                                    id: uuidv4(),
-                                    type: 'image',
-                                    source: 'user',
-                                    content: event.target.result as string,
-                                    position: { x: currentMousePos.x, y: currentMousePos.y },
-                                    width: NODE_WIDTH,
-                                    height: 200,
-                                    ports: [uuidv4()],
-                                    model: defaultModel
-                                };
-                                setNodes(prev => [...prev, newNode]);
-                            }
-                        };
-                        reader.readAsDataURL(file);
-                    }
-                    return;
-                }
-            }
-        };
-
-        window.addEventListener('keydown', handleKeyDown);
-        window.addEventListener('paste', handleGlobalPaste);
-        return () => {
-            window.removeEventListener('keydown', handleKeyDown);
-            window.removeEventListener('paste', handleGlobalPaste);
-        };
-    }, [selectedNodeIds, selectedEdgeId, selectedGroupId, selectionBox, isMergeMode, handleUndo, handleRedo, imageModal, handleDeleteNodes, saveHistory, defaultModel]);
 
     // --- Handlers (Mouse, Drag, etc) ---
     const handleContextMenu = useCallback((e: React.MouseEvent) => {
@@ -850,11 +997,7 @@ const App: React.FC = () => {
 
     const handleCanvasDragOver = (e: React.DragEvent) => {
         e.preventDefault();
-        if (e.dataTransfer.types.includes('application/gemini-canvas-text') || e.dataTransfer.types.includes('Files')) {
-            e.dataTransfer.dropEffect = 'copy';
-        } else {
-            e.dataTransfer.dropEffect = 'none';
-        }
+        e.dataTransfer.dropEffect = 'copy';
     };
 
     const handleDrop = (e: React.DragEvent) => {
@@ -868,20 +1011,44 @@ const App: React.FC = () => {
                 saveHistory();
                 const pos = getCanvasPos(e.clientX, e.clientY, offset, scale);
                 const reader = new FileReader();
-                reader.onload = (event) => {
+                reader.onload = async (event) => {
                     if (event.target?.result) {
-                        const newNode: NodeData = {
-                            id: uuidv4(),
-                            type: 'image',
-                            source: 'user',
-                            content: event.target.result as string,
-                            position: { x: pos.x - NODE_WIDTH / 2, y: pos.y - 75 },
-                            width: NODE_WIDTH,
-                            height: 200,
-                            ports: [uuidv4()],
-                            model: defaultModel
-                        };
-                        setNodes(prev => [...prev, newNode]);
+                        const base64String = event.target.result as string;
+                        const imageId = uuidv4();
+                        const mimeType = file.type || 'image/jpeg';
+                        
+                        try {
+                            await saveImage(imageId, base64String, mimeType);
+                            const newNode: NodeData = {
+                                id: uuidv4(),
+                                type: 'image',
+                                source: 'user',
+                                content: '', // Clear base64
+                                imageId: imageId,
+                                imageMimeType: mimeType,
+                                position: { x: pos.x - NODE_WIDTH / 2, y: pos.y - 75 },
+                                width: NODE_WIDTH,
+                                height: 200,
+                                ports: [uuidv4()],
+                                model: defaultModel
+                            };
+                            setNodes(prev => [...prev, newNode]);
+                        } catch (err) {
+                            console.error("Failed to save dropped image:", err);
+                            // Fallback if IDB fails
+                            const newNode: NodeData = {
+                                id: uuidv4(),
+                                type: 'image',
+                                source: 'user',
+                                content: base64String,
+                                position: { x: pos.x - NODE_WIDTH / 2, y: pos.y - 75 },
+                                width: NODE_WIDTH,
+                                height: 200,
+                                ports: [uuidv4()],
+                                model: defaultModel
+                            };
+                            setNodes(prev => [...prev, newNode]);
+                        }
                     }
                 };
                 reader.readAsDataURL(file);
@@ -890,26 +1057,6 @@ const App: React.FC = () => {
         }
 
         saveHistory();
-
-        const customData = e.dataTransfer.getData('application/gemini-canvas-text');
-        if (customData) {
-            const data = JSON.parse(customData);
-            const pos = getCanvasPos(e.clientX, e.clientY, offset, scale);
-
-            const newNode: NodeData = {
-                id: uuidv4(),
-                type: 'text',
-                source: 'user',
-                content: data.content,
-                position: { x: pos.x, y: pos.y },
-                width: NODE_WIDTH,
-                height: 150,
-                ports: [uuidv4()],
-                model: defaultModel
-            };
-            setNodes(prev => [...prev, newNode]);
-            return;
-        }
 
         const text = e.dataTransfer.getData('text/plain');
         if (text) {
@@ -928,6 +1075,7 @@ const App: React.FC = () => {
             };
 
             setNodes(prev => [...prev, newNode]);
+            return;
         }
     };
 
@@ -1107,22 +1255,96 @@ const App: React.FC = () => {
         })));
 
         // Construct multimodal prompt
-        const promptParts = sortedNodes.map(n => {
+        const promptPartsPromises = sortedNodes.map(async (n) => {
             if (n.isInactive) return null; // SKIP INACTIVE NODES
 
-            const imageMatch = n.content.match(/^data:(image\/[a-z]+);base64,(.+)$/);
+            // Use parts if available
+            if (n.parts && n.parts.length > 0) {
+                const nodeParts: any[] = [];
+                for (const part of n.parts) {
+                    if (part.type === 'text' && part.content) {
+                        nodeParts.push({ text: part.content });
+                    } else if (part.type === 'image' && part.imageId) {
+                        try {
+                            const dataUrl = await getImage(part.imageId);
+                            if (dataUrl) {
+                                const match = dataUrl.match(/^data:(image\/[a-z\+]+);base64,(.+)$/);
+                                if (match) {
+                                    nodeParts.push({ 
+                                        inlineData: { mimeType: match[1], data: match[2] },
+                                        imageId: part.imageId
+                                    });
+                                }
+                            }
+                        } catch (err) {
+                            console.error("Failed to load part image:", err);
+                        }
+                    }
+                }
+                return nodeParts;
+            }
+
+            // Fallback for legacy nodes
+            if (n.imageId) {
+                try {
+                    const dataUrl = await getImage(n.imageId);
+                    if (dataUrl) {
+                        const match = dataUrl.match(/^data:(image\/[a-z\+]+);base64,(.+)$/);
+                        if (match) {
+                            return { 
+                                inlineData: { mimeType: match[1], data: match[2] },
+                                imageId: n.imageId
+                            };
+                        }
+                    }
+                } catch (err) {
+                    console.error("Failed to load image for prompt:", err);
+                }
+            }
+            
+            // Fallback: Check if content itself is a base64 image
+            const imageMatch = n.content.match(/^data:(image\/[a-z\+]+);base64,(.+)$/);
             if (imageMatch) {
                 return { inlineData: { mimeType: imageMatch[1], data: imageMatch[2] } };
-            } else if (n.type === 'image') {
+            }
+
+            if (n.type === 'image') {
                 return null;
             } else {
                 return { text: n.content };
             }
-        }).filter(Boolean);
+        });
+
+        const promptPartsResults = await Promise.all(promptPartsPromises);
+        const promptParts = promptPartsResults.flat().filter(Boolean) as any[];
 
         if (promptParts.length === 0) return;
 
+        // Create a cleaned version of promptParts for executionContext to avoid bloating metadata with base64
+        const cleanedExecutionContext = promptParts.map(part => {
+            if (part.inlineData) {
+                // If we have an imageId reference, we can replace the heavy data with a placeholder
+                if (part.imageId) {
+                    return { 
+                        inlineData: { mimeType: part.inlineData.mimeType, data: "(image data)" },
+                        imageId: part.imageId 
+                    };
+                }
+                // Otherwise keep it as is (should be rare if migration and upload/paste are working correctly)
+                return part;
+            }
+            return part;
+        });
+
         let modelToUse = triggerNode.model;
+
+        // Cancel any existing request for this node
+        if (abortControllersRef.current.has(triggerNodeId)) {
+            abortControllersRef.current.get(triggerNodeId)?.abort();
+        }
+        
+        const controller = new AbortController();
+        abortControllersRef.current.set(triggerNodeId, controller);
 
         setNodes(prev => prev.map(n => n.id === triggerNodeId ? { ...n, isGenerating: true } : n));
 
@@ -1130,9 +1352,12 @@ const App: React.FC = () => {
             const responseParts = await generateContent(
                 promptParts,
                 modelToUse,
-                {}, // Use default options as per new spec
+                { signal: controller.signal },
                 providerConfigs
             );
+
+            // Clean up controller
+            abortControllersRef.current.delete(triggerNodeId);
 
             // Prepare for update - Fetch latest state again in case it changed during await
             const latestNodes = [...nodesRef.current];
@@ -1143,87 +1368,230 @@ const App: React.FC = () => {
 
             latestNodes[freshTriggerIndex] = { ...latestNodes[freshTriggerIndex], isGenerating: false };
 
-            let startIdx = 0;
-            let predecessorId = triggerNodeId;
-
-            if (isTriggerEmpty && responseParts.length > 0) {
-                const firstPart = responseParts[0];
-                latestNodes[freshTriggerIndex] = {
-                    ...latestNodes[freshTriggerIndex],
-                    content: firstPart.content,
-                    type: firstPart.type,
-                    source: 'ai',
-                    executionContext: promptParts
-                };
-                startIdx = 1;
-            }
-
-            let currentX = latestNodes[freshTriggerIndex].position.x + NODE_WIDTH + 100; // Gap
-            let currentY = latestNodes[freshTriggerIndex].position.y;
-
-            for (let i = startIdx; i < responseParts.length; i++) {
-                const part = responseParts[i];
-                const newNodeId = uuidv4();
-                const newPortId = uuidv4();
-
-                // Find predecessor to determine source handle
-                const predNodeIndex = latestNodes.findIndex(n => n.id === predecessorId);
-                const predNode = latestNodes[predNodeIndex];
-
-                // STRICTLY use the first port of the predecessor
-                const sourceHandleId = predNode.ports[0];
-
-                // If we are connecting to the only port available, add a new one to satisfy "generate second port" rule
-                if (predNode.ports.length === 1) {
-                    const nextPortId = uuidv4();
-                    latestNodes[predNodeIndex] = {
-                        ...predNode,
-                        ports: [...predNode.ports, nextPortId]
-                    };
+            const triggerNode = latestNodes[freshTriggerIndex];
+            
+            // Initialize parts if not present
+            let currentParts: any[] = triggerNode.parts || [];
+            
+            // If parts are empty but we have content/image, migrate them to parts first
+            if (currentParts.length === 0 && (triggerNode.content || triggerNode.imageId)) {
+                if (triggerNode.content) {
+                    currentParts.push({ id: uuidv4(), type: 'text', content: triggerNode.content });
                 }
-
-                const newNode: NodeData = {
-                    id: newNodeId,
-                    type: part.type,
-                    source: 'ai',
-                    content: part.content,
-                    position: { x: currentX, y: currentY },
-                    width: NODE_WIDTH,
-                    height: part.type === 'image' ? 200 : 150,
-                    ports: [newPortId], // Start with 1 port
-                    model: modelToUse,
-                    executionContext: promptParts
-                };
-
-                newNode.ports.push(uuidv4());
-
-                latestNodes.push(newNode);
-
-                const newEdge: EdgeData = {
-                    id: uuidv4(),
-                    source: predecessorId,
-                    target: newNodeId,
-                    sourceHandle: sourceHandleId,
-                    targetHandle: newPortId,
-                    color: getFlowColor(triggerNodeId)
-                };
-                latestEdges.push(newEdge);
-
-                // Move cursor
-                predecessorId = newNodeId;
-                currentX += NODE_WIDTH + 100;
+                if (triggerNode.imageId) {
+                    currentParts.push({ 
+                        id: uuidv4(), 
+                        type: 'image', 
+                        content: '', 
+                        imageId: triggerNode.imageId, 
+                        mimeType: triggerNode.imageMimeType 
+                    });
+                }
             }
+
+            for (const part of responseParts) {
+                if (part.type === 'text') {
+                    // If the last part is text, append to it
+                    const lastPart = currentParts[currentParts.length - 1];
+                    if (lastPart && lastPart.type === 'text') {
+                         if (lastPart.content.trim()) {
+                            lastPart.content += '\n\n' + part.content;
+                        } else {
+                            lastPart.content = part.content;
+                        }
+                    } else {
+                        // Otherwise create new text part
+                        currentParts.push({
+                            id: uuidv4(),
+                            type: 'text',
+                            content: part.content
+                        });
+                    }
+                } else if (part.type === 'image') {
+                    if (part.content && part.content.startsWith && part.content.startsWith('data:image/')) {
+                        const mimeMatch = part.content.match(/^data:([^;]+);base64,/);
+                        const base64Match = part.content.match(/^data:[^;]+;base64,(.+)$/);
+                        
+                        if (base64Match && mimeMatch) {
+                            const imageId = uuidv4();
+                            const mimeType = mimeMatch[1];
+                            await saveImage(imageId, base64Match[1], mimeType);
+                            
+                            // Try to create an immediate preview URL from the saved blob
+                            try {
+                                const blob = await getImageBlob(imageId);
+                                const previewUrl = blob ? URL.createObjectURL(blob) : undefined;
+                                const newPart: any = {
+                                    id: uuidv4(),
+                                    type: 'image',
+                                    content: '',
+                                    imageId: imageId,
+                                    mimeType: mimeType
+                                };
+                                if (previewUrl) newPart.__previewUrl = previewUrl;
+                                currentParts.push(newPart);
+                            } catch (err) {
+                                const newPart = {
+                                    id: uuidv4(),
+                                    type: 'image',
+                                    content: '',
+                                    imageId: imageId,
+                                    mimeType: mimeType
+                                };
+                                currentParts.push(newPart);
+                            }
+                        }
+                    }
+                }
+            }
+
+            
+
+            // Update content string for backward compatibility / search
+            const fullContent = currentParts
+                .filter(p => p.type === 'text')
+                .map(p => p.content)
+                .join('\n');
+
+            latestNodes[freshTriggerIndex] = {
+                ...triggerNode,
+                type: 'text',
+                content: fullContent,
+                parts: currentParts,
+                executionContext: cleanedExecutionContext,
+                source: 'ai'
+            };
 
             setNodes(latestNodes);
-            setEdges(latestEdges);
-
-        } catch (e) {
-            console.error(e);
+            // Edges unchanged
+            
+        } catch (e: any) {
+            if (e.name === 'AbortError') {
+                console.log('Generation aborted');
+            } else {
+                console.error(e);
+            }
             setNodes(prev => prev.map(n => n.id === triggerNodeId ? { ...n, isGenerating: false } : n));
+        } finally {
+            abortControllersRef.current.delete(triggerNodeId);
         }
     }, [providerConfigs, saveHistory]);
 
+    const handleCancelGenerate = useCallback((id: string) => {
+        if (abortControllersRef.current.has(id)) {
+            abortControllersRef.current.get(id)?.abort();
+            abortControllersRef.current.delete(id);
+        }
+        setNodes(prev => prev.map(n => n.id === id ? { ...n, isGenerating: false } : n));
+    }, []);
 
+    // --- Keyboard Shortcuts ---
+    useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+                if (e.shiftKey) {
+                    handleRedo();
+                } else {
+                    handleUndo();
+                }
+                return;
+            }
+            if ((e.ctrlKey || e.metaKey) && e.key === 'y') {
+                handleRedo();
+                return;
+            }
+
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                e.preventDefault();
+                selectedNodeIds.forEach(id => handleGenerate(id));
+                return;
+            }
+
+            if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+
+            if (e.key === 'Delete' || e.key === 'Backspace') {
+                if (isMergeMode) return;
+
+                if (selectedNodeIds.size > 0) {
+                    handleDeleteNodes(Array.from(selectedNodeIds));
+                } else if (selectedGroupId) {
+                    const group = groupsRef.current.find(g => g.id === selectedGroupId);
+                    if (group) handleDeleteNodes(group.nodeIds);
+                    setSelectedGroupId(null);
+                } else if (selectedEdgeId) {
+                    saveHistory();
+                    const newEdges = edgesRef.current.filter(edge => edge.id !== selectedEdgeId);
+                    setEdges(newEdges);
+                    setNodes(prevNodes => prevNodes.map(node => ({
+                        ...node,
+                        ports: getCleanedPorts(node, newEdges)
+                    })));
+                    setSelectedEdgeId(null);
+                }
+            }
+
+            if (e.key === 'Escape') {
+                if (isMergeMode) {
+                    handleCancelMergeMode();
+                } else {
+                    setContextMenu(null);
+                    setPromptModal(null);
+                    setRenameGroupModal(null);
+                    if (imageModal) setImageModal(null);
+                    if (selectionBox) setSelectionBox(null);
+                    setSelectedGroupId(null);
+                    setShowSettings(false);
+                    setSelectedNodeIds(new Set());
+                }
+            }
+        };
+
+        const handleGlobalPaste = (e: ClipboardEvent) => {
+            const target = e.target as HTMLElement;
+            if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return;
+
+            const items = e.clipboardData?.items;
+            if (!items) return;
+
+            const currentMousePos = mousePosRef.current;
+
+            for (const item of items) {
+                if (item.type.startsWith('image/')) {
+                    e.preventDefault();
+                    const file = item.getAsFile();
+                    if (file) {
+                        saveHistory();
+                        const reader = new FileReader();
+                        reader.onload = (event) => {
+                            if (event.target?.result) {
+                                const newNode: NodeData = {
+                                    id: uuidv4(),
+                                    type: 'image',
+                                    source: 'user',
+                                    content: event.target.result as string,
+                                    position: { x: currentMousePos.x, y: currentMousePos.y },
+                                    width: NODE_WIDTH,
+                                    height: 200,
+                                    ports: [uuidv4()],
+                                    model: defaultModel
+                                };
+                                setNodes(prev => [...prev, newNode]);
+                            }
+                        };
+                        reader.readAsDataURL(file);
+                    }
+                    return;
+                }
+            }
+        };
+
+        window.addEventListener('keydown', handleKeyDown);
+        window.addEventListener('paste', handleGlobalPaste);
+        return () => {
+            window.removeEventListener('keydown', handleKeyDown);
+            window.removeEventListener('paste', handleGlobalPaste);
+        };
+    }, [selectedNodeIds, selectedEdgeId, selectedGroupId, selectionBox, isMergeMode, handleUndo, handleRedo, imageModal, handleDeleteNodes, saveHistory, defaultModel, handleGenerate]);
 
     const bgClass = isDarkMode ? 'bg-gray-950' : 'bg-gray-50';
     const dotColor = isDarkMode ? '#374151' : '#d1d5db';
@@ -1281,8 +1649,8 @@ const App: React.FC = () => {
 
                 <svg className="absolute top-0 left-0 w-[1px] h-[1px] pointer-events-none overflow-visible">
                     {edges.map(edge => {
-                        const start = getHandlePosition(edge.source, edge.sourceHandle, 'right', nodes);
-                        const end = getHandlePosition(edge.target, edge.targetHandle, 'left', nodes);
+                        const start = getHandlePosition(edge.source, edge.sourceHandle, 'right', nodeMap);
+                        const end = getHandlePosition(edge.target, edge.targetHandle, 'left', nodeMap);
                         if (!start || !end) return null;
                         return (
                             <ConnectionLine
@@ -1298,10 +1666,10 @@ const App: React.FC = () => {
                     {connectingHandle && (
                         (() => {
                             if (connectingHandle.type === 'source') {
-                                const startPos = getHandlePosition(connectingHandle.nodeId, connectingHandle.handleId, 'right', nodes);
+                                const startPos = getHandlePosition(connectingHandle.nodeId, connectingHandle.handleId, 'right', nodeMap);
                                 return startPos ? <ConnectionLine start={startPos} end={mousePos} color={connectingHandle.color} isTemp /> : null;
                             } else {
-                                const endPos = getHandlePosition(connectingHandle.nodeId, connectingHandle.handleId, 'left', nodes);
+                                const endPos = getHandlePosition(connectingHandle.nodeId, connectingHandle.handleId, 'left', nodeMap);
                                 return endPos ? <ConnectionLine start={mousePos} end={endPos} color={connectingHandle.color} isTemp /> : null;
                             }
                         })()
@@ -1322,24 +1690,22 @@ const App: React.FC = () => {
                             highlightedPortIds={flowHighlights.ports}
                             mergeIndex={isMergeMode ? mergeSelection.indexOf(node.id) : undefined}
                             isDarkMode={isDarkMode}
-                            isDragging={isDraggingNodes && (
-                                selectedNodeIds.has(node.id) ||
-                                (!!selectedGroupId && groups.find(g => g.id === selectedGroupId)?.nodeIds.includes(node.id))
-                            )}
+                            isDragging={draggingNodeIds.has(node.id)}
                             availableModels={availableModelsList}
                             activeDragHandleId={activeDragHandleId}
                             onUpdate={handleUpdateNode}
                             onUpdateModel={handleUpdateNodeModel}
                             onUpdateConfig={handleUpdateNodeConfig}
-                            onDelete={(id) => handleDeleteNodes([id])}
+                            onDelete={handleDeleteSingleNode}
                             onGenerate={handleGenerate}
+                            onCancelGenerate={handleCancelGenerate}
                             onClear={handleClearNode}
                             onMouseDown={handleNodeMouseDown}
                             onConnectStart={handleConnectStart}
                             onConnectEnd={handleConnectEnd}
                             onContextMenu={handleNodeContextMenu}
-                            onStartEdit={() => saveHistory()}
-                            onViewImage={(url) => setImageModal(url)}
+                            onStartEdit={handleStartEdit}
+                            onViewImage={handleViewImage}
                             onToggleActive={handleToggleActive}
                         />
                     );
@@ -1383,14 +1749,29 @@ const App: React.FC = () => {
 
                     {contextMenu.type === 'node' && (
                         <>
-                            <button onClick={() => {
+                            <button onClick={async () => {
                                 const node = nodes.find(n => n.id === contextMenu.targetId);
                                 if (node && node.executionContext) {
-                                    const formattedContext = node.executionContext.map((part: any) => {
+                                    const formattedContextPromises = node.executionContext.map(async (part: any) => {
                                         if (part.text) return { type: 'text', content: part.text };
-                                        if (part.inlineData) return { type: 'image', content: `data:${part.inlineData.mimeType};base64,${part.inlineData.data}` };
+                                        if (part.inlineData) {
+                                            // If we have an imageId, try to load the actual image from IndexedDB
+                                            if (part.imageId) {
+                                                try {
+                                                    const actualImageData = await getImage(part.imageId);
+                                                    if (actualImageData) {
+                                                        return { type: 'image', content: actualImageData };
+                                                    }
+                                                } catch (err) {
+                                                    console.error("Failed to load image from IndexedDB for modal:", err);
+                                                }
+                                            }
+                                            // Fallback to what's in the part (which might be "(image data)")
+                                            return { type: 'image', content: `data:${part.inlineData.mimeType};base64,${part.inlineData.data}` };
+                                        }
                                         return null;
-                                    }).filter(Boolean);
+                                    });
+                                    const formattedContext = (await Promise.all(formattedContextPromises)).filter(Boolean);
                                     setPromptModal({ isOpen: true, content: formattedContext });
                                 }
                                 setContextMenu(null);
@@ -1509,6 +1890,28 @@ const App: React.FC = () => {
                 </div>
             )}
 
+            {imageModal && (
+                <div
+                    className="absolute inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-md animate-in fade-in duration-200"
+                    onClick={() => setImageModal(null)}
+                >
+                    <div className="relative max-w-[95vw] max-h-[95vh] flex flex-col items-center justify-center p-2 outline-none">
+                        <img
+                            src={imageModal}
+                            alt="Full View"
+                            className="max-w-full max-h-[90vh] object-contain rounded-lg shadow-2xl"
+                            onClick={(e) => e.stopPropagation()}
+                        />
+                        <button
+                            className="absolute top-4 right-4 bg-black/50 hover:bg-black/70 text-white p-2 rounded-full backdrop-blur-sm transition-colors border border-white/10"
+                            onClick={() => setImageModal(null)}
+                        >
+                            <X className="w-6 h-6" />
+                        </button>
+                    </div>
+                </div>
+            )}
+
             {isMergeMode && (
                 <div className={`absolute bottom-10 left-1/2 -translate-x-1/2 z-[100] rounded-full shadow-2xl flex items-center gap-6 px-6 py-3 animate-in slide-in-from-bottom-6 duration-300 ring-1 ring-white/10 backdrop-blur-2xl border ${isDarkMode ? 'bg-gray-900/90 border-gray-700' : 'bg-white/90 border-gray-200'}`}>
                     <div className="flex flex-col">
@@ -1576,10 +1979,17 @@ const App: React.FC = () => {
 
                     {/* File Group */}
                     <div className="flex items-center gap-0.5">
-                        <button onClick={handleSaveCanvas} className={iconButtonClass()} title="Save Canvas">
+                         {/* Status Indicator */}
+                         {fileHandle && (
+                            <div className={`flex items-center gap-1.5 px-2 mr-1 h-8 rounded-lg border text-[10px] font-mono select-none ${isDarkMode ? 'bg-white/5 border-white/5' : 'bg-black/5 border-black/5'}`}>
+                                <div className={`w-1.5 h-1.5 rounded-full transition-colors ${isAutoSaving ? 'bg-amber-500 animate-pulse shadow-[0_0_8px_rgba(245,158,11,0.5)]' : 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]'}`} />
+                                <span className={`max-w-[80px] truncate hidden sm:inline font-medium ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>{fileHandle.name}</span>
+                            </div>
+                        )}
+                        <button onClick={handleSaveCanvas} className={iconButtonClass()} title="Save Canvas As...">
                             <Download className="w-4 h-4" />
                         </button>
-                        <button onClick={() => loadCanvasInputRef.current?.click()} className={iconButtonClass()} title="Load Canvas">
+                        <button onClick={handleOpenFile} className={iconButtonClass()} title="Open File (Auto-Save)">
                             <Upload className="w-4 h-4" />
                         </button>
                     </div>

@@ -9,15 +9,23 @@ export const getCanvasPos = (clientX: number, clientY: number, offset: Position,
     };
 };
 
-export const getHandlePosition = (nodeId: string, handleId: string, side: 'left' | 'right', nodes: NodeData[]): Position | null => {
-    const node = nodes.find(n => n.id === nodeId);
+export const getHandlePosition = (nodeId: string, handleId: string, side: 'left' | 'right', nodes: NodeData[] | Map<string, NodeData>): Position | null => {
+    const node = Array.isArray(nodes) ? nodes.find(n => n.id === nodeId) : nodes.get(nodeId);
     if (!node) return null;
 
     const index = node.ports.indexOf(handleId);
     if (index === -1) return null;
 
-    const y = node.position.y + 50 + (index * 28) + 28; // Center of the port handle (16px offset + 12px halfway point of w-6/h-6 container)
-    const x = side === 'left' ? node.position.x : node.position.x + node.width;
+    let y;
+    if (node.collapsed) {
+        y = node.position.y + 35 + (index * 28);
+    } else {
+        y = node.position.y + 50 + (index * 28) + 28;
+    }
+    
+    // If collapsed, use a fixed width (e.g. 220px) instead of the expanded node.width
+    const effectiveWidth = node.collapsed ? 220 : node.width;
+    const x = side === 'left' ? node.position.x : node.position.x + effectiveWidth;
 
     return { x, y };
 };
@@ -84,18 +92,57 @@ export const performLayout = (targetNodes: NodeData[], targetEdges: EdgeData[], 
     });
 
     // 2. Coordinate Assignment
-    const HORIZONTAL_SPACING = 350;
-    const VERTICAL_SPACING = 200;
+    const BASE_HORIZONTAL_SPACING = 80; // Gap between columns
+    const BASE_VERTICAL_SPACING = 50;   // Gap between rows
+    
+    const COLLAPSED_WIDTH = 220;
+    const COLLAPSED_HEIGHT = 70;
 
     return targetNodes.map(node => {
         const level = levels.get(node.id) || 0;
         const indexInGroup = levelGroups[level].indexOf(node.id);
 
+        // Use collapsed size if node is collapsed, otherwise use actual size
+        const nodeWidth = node.collapsed ? COLLAPSED_WIDTH : (node.width || 300);
+        const nodeHeight = node.collapsed 
+            ? Math.max(COLLAPSED_HEIGHT, (node.ports?.length || 0) * 28 + 45)
+            : (node.height || 150);
+
+        // Calculate horizontal spacing based on actual node widths
+        let xPos = originX;
+        for (let i = 0; i < level; i++) {
+            // Find the widest node in the previous level for proper spacing
+            const prevLevelNodeIds = levelGroups[i];
+            const prevLevelNodes = prevLevelNodeIds
+                .map(id => targetNodes.find(n => n.id === id)!)
+                .filter(Boolean);
+            
+            const maxWidthInLevel = Math.max(
+                ...prevLevelNodes.map(n => {
+                    return n.collapsed ? COLLAPSED_WIDTH : (n.width || 300);
+                }),
+                300
+            );
+            
+            xPos += maxWidthInLevel + BASE_HORIZONTAL_SPACING;
+        }
+
+        // Calculate vertical spacing based on actual node heights
+        let yPos = originY;
+        for (let j = 0; j < indexInGroup; j++) {
+            const prevNodeId = levelGroups[level][j];
+            const prevNode = targetNodes.find(n => n.id === prevNodeId);
+            const prevNodeHeight = prevNode?.collapsed 
+                ? Math.max(COLLAPSED_HEIGHT, (prevNode.ports?.length || 0) * 28 + 45)
+                : (prevNode?.height || 150);
+            yPos += prevNodeHeight + BASE_VERTICAL_SPACING;
+        }
+
         return {
             ...node,
             position: {
-                x: originX + level * HORIZONTAL_SPACING,
-                y: originY + indexInGroup * VERTICAL_SPACING
+                x: xPos,
+                y: yPos
             }
         };
     });
@@ -293,11 +340,17 @@ export const calculateMergeEffects = (
     const newNodeId = uuidv4();
     const newPortId = uuidv4();
 
+    // Check if all merged nodes have the same imageId - if so, preserve it
+    const firstImageId = nodesToMerge[0]?.imageId;
+    const allSameImage = firstImageId && nodesToMerge.every(n => n.imageId === firstImageId);
+
     const newNode: NodeData = {
         id: newNodeId,
         type: 'text',
         source: 'user',
         content: mergedContent,
+        imageId: allSameImage ? firstImageId : undefined,
+        imageMimeType: allSameImage ? nodesToMerge[0]?.imageMimeType : undefined,
         position: { x: minX, y: minY },
         width: NODE_WIDTH,
         height: 150,

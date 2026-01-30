@@ -10,7 +10,7 @@ export interface NodeData {
   id: string;
   type: NodeType;
   source: 'user' | 'ai'; // Distinguish between manual input and AI generation
-  content: string; // Stores text content or Image Base64 string
+  content: string; // Stores text content or reference to image (imageId for images)
   position: Position;
   width: number;
   height: number;
@@ -19,6 +19,18 @@ export interface NodeData {
   model?: string;
   executionContext?: any[]; // Store the prompt used to generate this node
   isInactive?: boolean; // New property for disabled/ghost state
+  collapsed?: boolean;
+  imageId?: string; // Reference to image stored in IndexedDB (for type='image')
+  imageMimeType?: string; // MIME type of the stored image
+  parts?: ContentPart[]; // Unified content structure
+}
+
+export interface ContentPart {
+  id: string;
+  type: 'text' | 'image';
+  content: string; // Text content or empty for image
+  imageId?: string; // For image parts
+  mimeType?: string;
 }
 
 export interface GroupData {
@@ -43,6 +55,7 @@ export interface CanvasState {
   groups: GroupData[];
   scale: number;
   offset: Position;
+  providerConfigs?: Record<ProviderType, ProviderConfig>;
 }
 
 export type ProviderType = 'gemini' | 'openai' | 'anthropic';
