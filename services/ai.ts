@@ -1,4 +1,3 @@
-
 import { GoogleGenAI } from "@google/genai";
 import { ProviderConfig } from "../types";
 
@@ -27,32 +26,38 @@ export const generateContent = async (
     options: GenerationOptions = {},
     configs?: Record<string, ProviderConfig>
 ): Promise<GeneratedPart[]> => {
-    // Determine the provider based on the model ID
+    // Determine the provider based on the model ID or value
     let provider = 'gemini';
+    let actualModelValue = model;
+
     if (configs) {
         for (const [p, config] of Object.entries(configs)) {
-            if (config.models.some(m => m.value === model)) {
+            // Find by unique configuration ID first, then fallback to value (model name)
+            const found = config.models.find(m => m.id === model || m.value === model);
+            if (found) {
                 provider = p;
+                actualModelValue = found.value;
                 break;
             }
         }
     }
 
     if (provider === 'openai') {
-        return generateOpenAIContent(input, model, options, configs?.['openai']);
+        return generateOpenAIContent(input, model, actualModelValue, options, configs?.['openai']);
     }
 
     if (provider === 'anthropic') {
-        return generateAnthropicContent(input, model, options, configs?.['anthropic']);
+        return generateAnthropicContent(input, model, actualModelValue, options, configs?.['anthropic']);
     }
 
     // Default to Gemini
-    return generateGeminiContent(input, model, options, configs?.['gemini']);
+    return generateGeminiContent(input, model, actualModelValue, options, configs?.['gemini']);
 };
 
 const generateGeminiContent = async (
     input: string | Array<{ text?: string; inlineData?: { mimeType: string; data: string } }>,
-    model: string,
+    modelId: string,
+    actualModel: string,
     options: GenerationOptions,
     config?: ProviderConfig
 ): Promise<GeneratedPart[]> => {
@@ -60,7 +65,7 @@ const generateGeminiContent = async (
         const apiKey = config?.key;
         if (!apiKey) return [{ type: 'text', content: "Error: Gemini API Key is missing." }];
 
-        const modelConfig = config?.models.find(m => m.value === model);
+        const modelConfig = config?.models.find(m => m.id === modelId || m.value === modelId);
         const ai = new GoogleGenAI({ apiKey: apiKey });
 
         let contents;
@@ -71,7 +76,7 @@ const generateGeminiContent = async (
         }
 
         const requestPayload: any = {
-            model: model,
+            model: actualModel,
             contents: contents,
             ...(modelConfig?.config || {})
         };
@@ -80,7 +85,9 @@ const generateGeminiContent = async (
             requestPayload.generationConfig = { temperature: options.temperature ?? 0.7 };
         }
 
-        const response = await ai.models.generateContent(requestPayload, { signal: options.signal });
+        // The @google/genai SDK (v1.38.0) generateContent expects only the payload.
+        // Signal can be passed if supported by the SDK version, but here it caused an error.
+        const response = await ai.models.generateContent(requestPayload);
         const parts: GeneratedPart[] = [];
         if (response.candidates?.[0]?.content?.parts) {
             for (const part of response.candidates[0].content.parts) {
@@ -98,7 +105,8 @@ const generateGeminiContent = async (
 
 const generateOpenAIContent = async (
     input: string | Array<{ text?: string; inlineData?: { mimeType: string; data: string } }>,
-    model: string,
+    modelId: string,
+    actualModel: string,
     options: GenerationOptions,
     config?: ProviderConfig
 ): Promise<GeneratedPart[]> => {
@@ -106,7 +114,7 @@ const generateOpenAIContent = async (
         const apiKey = config?.key;
         if (!apiKey) return [{ type: 'text', content: "Error: API Key is missing." }];
 
-        const modelConfig = config?.models.find(m => m.value === model);
+        const modelConfig = config?.models.find(m => m.id === modelId || m.value === modelId);
         const baseUrl = config?.baseUrl || 'https://api.openai.com/v1';
 
         const messages: any[] = [];
@@ -124,7 +132,7 @@ const generateOpenAIContent = async (
         }
 
         let body: any = {
-            model: model,
+            model: actualModel,
             messages: messages,
             temperature: options.temperature ?? 0.7,
             ...modelConfig?.config
@@ -154,7 +162,8 @@ const generateOpenAIContent = async (
 
 const generateAnthropicContent = async (
     input: string | Array<{ text?: string; inlineData?: { mimeType: string; data: string } }>,
-    model: string,
+    modelId: string,
+    actualModel: string,
     options: GenerationOptions,
     config?: ProviderConfig
 ): Promise<GeneratedPart[]> => {
@@ -162,7 +171,7 @@ const generateAnthropicContent = async (
         const apiKey = config?.key;
         if (!apiKey) return [{ type: 'text', content: "Error: Anthropic API Key is missing." }];
 
-        const modelConfig = config?.models.find(m => m.value === model);
+        const modelConfig = config?.models.find(m => m.id === modelId || m.value === modelId);
         const baseUrl = config?.baseUrl || 'https://api.anthropic.com/v1';
 
         const messages: any[] = [];
@@ -187,7 +196,7 @@ const generateAnthropicContent = async (
         }
 
         let body: any = {
-            model: model,
+            model: actualModel,
             messages: messages,
             max_tokens: 4096, // Anthropic requires max_tokens
             temperature: options.temperature ?? 0.7,

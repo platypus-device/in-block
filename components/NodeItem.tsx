@@ -1,6 +1,6 @@
 import React, { useRef, useEffect, useState, useMemo } from 'react';
-import { NodeData } from '../types';
-import { X, Loader2, Play, Square, Image as ImageIcon, Upload, Maximize2, Eraser, ChevronUp, ChevronDown, Power } from 'lucide-react';
+import { NodeData, ContentPart } from '../types';
+import { X, Loader2, Play, Image as ImageIcon, Maximize2, Eraser, ChevronUp, ChevronDown, Power, Trash2 } from 'lucide-react';
 import { CustomSelect } from './CustomSelect';
 import { saveImage } from '../services/imageDb';
 import { v4 as uuidv4 } from 'uuid';
@@ -63,98 +63,80 @@ export const NodeItem: React.FC<NodeItemProps> = React.memo(({
     onToggleActive
 }) => {
     const nodeRef = useRef<HTMLDivElement>(null);
-    const textareaRef = useRef<HTMLTextAreaElement>(null);
     const contentWrapperRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
-    // Refs for click-outside detection
-    const settingsRef = useRef<HTMLDivElement>(null);
-    const toggleRef = useRef<HTMLButtonElement>(null);
     const lastHeight = useRef<number>(node.height || 0);
 
     const [isFocused, setIsFocused] = useState(false);
     const [hoveredZoneIndex, setHoveredZoneIndex] = useState<number | null>(null);
     const [isHovered, setIsHovered] = useState(false);
+    const [draggedPartIndex, setDraggedPartIndex] = useState<number | null>(null);
+    const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
 
-    // Local state to control settings panel visibility
-    const [showSettings, setShowSettings] = useState(false);
+    // Local state to control UI
     const [isResizing, setIsResizing] = useState(false);
-    const [imageUrl, setImageUrl] = useState<string>('');
     const manuallyResizedRef = useRef(false);
-
-    // Close settings if node is deselected
-    useEffect(() => {
-        if (!isSelected) {
-            setShowSettings(false);
-        }
-    }, [isSelected]);
-
-    // Click Outside Logic
-    useEffect(() => {
-        const handleClickOutside = (event: MouseEvent) => {
-            if (!showSettings) return;
-
-            // Check if click is outside settings panel AND outside the toggle button
-            if (
-                settingsRef.current &&
-                !settingsRef.current.contains(event.target as Node) &&
-                toggleRef.current &&
-                !toggleRef.current.contains(event.target as Node)
-            ) {
-                setShowSettings(false);
-            }
-        };
-
-        // Use capture phase to detect clicks even if stopPropagation is used in children/parents
-        document.addEventListener('mousedown', handleClickOutside, true);
-        return () => {
-            document.removeEventListener('mousedown', handleClickOutside, true);
-        };
-    }, [showSettings]);
 
     // Auto-resize logic
     useEffect(() => {
-        if (contentWrapperRef.current && node.type === 'text' && !isResizing && !manuallyResizedRef.current) {
+        if (contentWrapperRef.current && !isResizing) {
             const wrapper = contentWrapperRef.current;
             
             const rafId = requestAnimationFrame(() => {
+                const scrollTop = wrapper.scrollTop;
                 // Ensure all textareas fit their content
                 const textareas = wrapper.querySelectorAll('textarea');
                 textareas.forEach(ta => {
+                    const offset = ta.offsetHeight - ta.clientHeight;
                     ta.style.height = 'auto';
-                    ta.style.height = ta.scrollHeight + 'px';
+                    const newHeight = ta.scrollHeight + offset;
+                    ta.style.height = newHeight + 'px';
                 });
+                wrapper.scrollTop = scrollTop;
 
-                const totalHeight = wrapper.scrollHeight;
-                const overhead = 120; // Header + Footer
-                const targetHeight = totalHeight + overhead;
+                // Only update the overall block height if it hasn't been manually resized
+                if (!manuallyResizedRef.current) {
+                    const totalHeight = wrapper.scrollHeight;
+                    const overhead = 120; // Header + Footer
+                    const targetHeight = totalHeight + overhead;
 
-                const minH = node.ports && node.ports.length > 0 ? (50 + node.ports.length * 28 + 20) : 150;
-                const maxH = 550;
-                const finalHeight = Math.min(Math.max(targetHeight, minH), maxH);
+                    const minH = node.ports && node.ports.length > 0 ? (50 + node.ports.length * 28 + 20) : 150;
+                    const maxH = 550;
+                    const finalHeight = Math.min(Math.max(targetHeight, minH), maxH);
 
-                if (Math.abs(finalHeight - node.height) > 2) {
-                    onUpdateConfig && onUpdateConfig(node.id, { height: finalHeight });
+                    if (Math.abs(finalHeight - node.height) > 2) {
+                        onUpdateConfig && onUpdateConfig(node.id, { height: finalHeight });
+                    }
                 }
             });
             return () => cancelAnimationFrame(rafId);
         }
-    }, [node.parts, node.content, node.type, isResizing, node.height, onUpdateConfig]);
+    }, [node.parts, node.content, node.type, isResizing, node.height, node.width, node.collapsed, onUpdateConfig]);
 
     // Helper to get parts for rendering (Migration on the fly)
-    const displayParts = useMemo(() => {
-        if (node.parts && node.parts.length > 0) return node.parts;
-        
-        // Legacy fallback
-        const parts: any[] = [];
-        if (node.content) {
-            parts.push({ id: 'legacy-text', type: 'text', content: node.content });
+    const displayParts = useMemo<ContentPart[]>(() => {
+        let parts: ContentPart[] = [];
+        if (node.parts && node.parts.length > 0) {
+            parts = [...node.parts];
+        } else {
+            // Legacy fallback
+            if (node.content) {
+                parts.push({ id: 'legacy-text', type: 'text', content: node.content });
+            }
+            if (node.imageId) {
+                parts.push({ id: 'legacy-image', type: 'image', content: '', imageId: node.imageId });
+            }
         }
-        if (node.imageId) {
-            parts.push({ id: 'legacy-image', type: 'image', content: '', imageId: node.imageId });
-        }
+
         if (parts.length === 0) {
             parts.push({ id: 'empty', type: 'text', content: '' });
+        } else {
+            // Ensure trailing text part for user input
+            const lastPart = parts[parts.length - 1];
+            if (lastPart.type !== 'text' || (lastPart.type === 'text' && lastPart.content && lastPart.content.trim().length > 0)) {
+                parts.push({ id: 'virtual-trailing-text', type: 'text', content: '' });
+            }
         }
         return parts;
     }, [node.parts, node.content, node.imageId]);
@@ -169,7 +151,7 @@ export const NodeItem: React.FC<NodeItemProps> = React.memo(({
              let hasUpdates = false;
              
              // 1. Identify which imageIds we need but don't have URLs for
-             const neededImageIds = new Set(
+             const neededImageIds = new Set<string>(
                  displayParts
                     .filter(p => p.type === 'image' && p.imageId)
                     .map(p => p.imageId!)
@@ -208,14 +190,18 @@ export const NodeItem: React.FC<NodeItemProps> = React.memo(({
 
         return () => {
             // Cleanup all on unmount
-            Object.values(objectUrlsRef.current).forEach(url => URL.revokeObjectURL(url));
+            Object.values(objectUrlsRef.current).forEach(url => {
+                if (typeof url === 'string') URL.revokeObjectURL(url);
+            });
             objectUrlsRef.current = {};
         };
     }, [displayParts]);
 
     // Revoke transient preview URLs when parts change or on unmount to avoid leaking object URLs
     useEffect(() => {
-        const prevPreviewUrls = displayParts.map((p: any) => p.__previewUrl).filter(Boolean);
+        const prevPreviewUrls = displayParts
+            .map((p: any) => p.__previewUrl as string)
+            .filter(Boolean);
         return () => {
             for (const pv of prevPreviewUrls) {
                 try { URL.revokeObjectURL(pv); } catch (e) { /* ignore */ }
@@ -234,6 +220,77 @@ export const NodeItem: React.FC<NodeItemProps> = React.memo(({
             setHoveredZoneIndex(null);
         }
     }, [isConnectable]);
+
+    // Helper to consolidate adjacent text parts
+    const consolidateTextParts = (parts: ContentPart[]): ContentPart[] => {
+        if (parts.length <= 1) return parts;
+        
+        const consolidated: ContentPart[] = [];
+        parts.forEach(part => {
+            const last = consolidated[consolidated.length - 1];
+            if (last && last.type === 'text' && part.type === 'text') {
+                // Merge text
+                const separator = (last.content.trim() && part.content.trim()) ? '\n\n' : '';
+                last.content = last.content + separator + part.content;
+            } else {
+                consolidated.push({ ...part });
+            }
+        });
+        return consolidated;
+    };
+
+    // --- Intra-block Reordering Logic ---
+
+    const handlePartDragStart = (e: React.DragEvent, index: number) => {
+        e.stopPropagation();
+        setDraggedPartIndex(index);
+        e.dataTransfer.effectAllowed = 'move';
+        // Set some data to make it work in all browsers
+        e.dataTransfer.setData('text/plain', `part-${index}`);
+    };
+
+    const handlePartDragOver = (e: React.DragEvent, index: number) => {
+        e.preventDefault();
+        e.stopPropagation();
+        e.dataTransfer.dropEffect = 'move';
+        if (draggedPartIndex !== null && draggedPartIndex !== index) {
+            setDragOverIndex(index);
+        }
+    };
+
+    const handlePartDrop = (e: React.DragEvent, targetIndex: number) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setDragOverIndex(null);
+
+        if (draggedPartIndex === null || draggedPartIndex === targetIndex) {
+            setDraggedPartIndex(null);
+            return;
+        }
+
+        const newParts = [...displayParts]
+            .filter(p => p.id !== 'virtual-trailing-text' && p.id !== 'empty');
+        
+        // Only reorder if indices are valid for non-virtual parts
+        if (draggedPartIndex < newParts.length && targetIndex < newParts.length) {
+            const [movedItem] = newParts.splice(draggedPartIndex, 1);
+            newParts.splice(targetIndex, 0, movedItem);
+
+            // Reorder without merging
+            const fullText = newParts.filter((p: any) => p.type === 'text').map((p: any) => p.content).join('\n');
+            onUpdateConfig && onUpdateConfig(node.id, { 
+                parts: newParts,
+                content: fullText
+            });
+        }
+        
+        setDraggedPartIndex(null);
+    };
+
+    const handlePartDragEnd = () => {
+        setDraggedPartIndex(null);
+        setDragOverIndex(null);
+    };
 
     // Load image from IndexedDB when imageId changes
     useEffect(() => {
@@ -254,17 +311,135 @@ export const NodeItem: React.FC<NodeItemProps> = React.memo(({
                     // Save image to IndexedDB
                     try {
                         await saveImage(imageId, base64String, mimeType);
-                        // Store only the imageId and mimeType, not the base64 data
-                        onUpdateConfig && onUpdateConfig(node.id, { imageId, imageMimeType: mimeType });
+                        
+                        const partIndex = (nodeRef.current as any)._uploadingPartIndex;
+                        if (partIndex !== undefined) {
+                            const newParts = [...displayParts];
+                            // Replace or update the specific part
+                            newParts[partIndex] = {
+                                ...newParts[partIndex],
+                                id: uuidv4(),
+                                type: 'image',
+                                imageId,
+                                mimeType
+                            };
+
+                            // Ensure trailing text part if this was the last part
+                            if (partIndex === newParts.length - 1) {
+                                newParts.push({ id: uuidv4(), type: 'text', content: '' });
+                            }
+
+                            const filtered = newParts.filter(p => p.id !== 'virtual-trailing-text' && p.id !== 'empty');
+                            const fullText = filtered.filter((p: any) => p.type === 'text').map((p: any) => p.content).join('\n');
+                            onUpdateConfig && onUpdateConfig(node.id, { 
+                                parts: filtered,
+                                content: fullText
+                            });
+                            delete (nodeRef.current as any)._uploadingPartIndex;
+                        } else {
+                            // Append to end if no specific part index (general upload/paste)
+                            const currentParts = [...displayParts].filter(p => {
+                                // Only remove virtual/empty parts if they are truly empty
+                                if (p.id === 'virtual-trailing-text' || p.id === 'empty') {
+                                    return p.content && p.content.trim().length > 0;
+                                }
+                                return true;
+                            });
+                            
+                            currentParts.push({
+                                id: uuidv4(),
+                                type: 'image',
+                                imageId,
+                                mimeType
+                            });
+                            
+                            const consolidated = consolidateTextParts(currentParts);
+                            const fullText = consolidated.filter((p: any) => p.type === 'text').map((p: any) => p.content).join('\n');
+                            onUpdateConfig && onUpdateConfig(node.id, { 
+                                parts: consolidated,
+                                content: fullText
+                            });
+                        }
                     } catch (error) {
                         console.error('Failed to save image:', error);
-                        // Fallback: store base64 if IndexedDB fails
-                        onUpdate(node.id, base64String);
                     }
                 }
             };
             reader.readAsDataURL(file);
         }
+    };
+
+    const handlePaste = (e: React.ClipboardEvent) => {
+        const items = e.clipboardData.items;
+        for (const item of items) {
+            if (item.type.startsWith('image/')) {
+                e.preventDefault();
+                e.stopPropagation();
+                if (onStartEdit) onStartEdit();
+                const blob = item.getAsFile();
+                if (blob) {
+                    const reader = new FileReader();
+                    reader.onload = async (evt) => {
+                        if (evt.target?.result) {
+                            const base64String = evt.target.result as string;
+                            const imageId = uuidv4();
+                            const mimeType = blob.type || 'image/jpeg';
+                            
+                            try {
+                                await saveImage(imageId, base64String, mimeType);
+                                
+                                // Append image part to end
+                                const newParts = [...displayParts]
+                                    .filter(p => {
+                                        // Only remove virtual/empty parts if they are truly empty
+                                        if (p.id === 'virtual-trailing-text' || p.id === 'empty') {
+                                            return p.content && p.content.trim().length > 0;
+                                        }
+                                        return true;
+                                    });
+                                
+                                newParts.push({
+                                    id: uuidv4(),
+                                    type: 'image',
+                                    content: '',
+                                    imageId: imageId,
+                                    mimeType: mimeType
+                                });
+                                
+                                // Always add a text part after image for further input
+                                newParts.push({
+                                    id: uuidv4(),
+                                    type: 'text',
+                                    content: ''
+                                });
+
+                                const consolidated = consolidateTextParts(newParts);
+                                const fullText = consolidated.filter((p: any) => p.type === 'text').map((p: any) => p.content).join('\n');
+                                
+                                onUpdateConfig && onUpdateConfig(node.id, { 
+                                    parts: consolidated,
+                                    content: fullText
+                                });
+                            } catch (error) {
+                                console.error('Failed to save pasted image:', error);
+                            }
+                        }
+                    };
+                    reader.readAsDataURL(blob);
+                }
+                break;
+            }
+        }
+    };
+
+    const handleTogglePartCollapse = (index: number) => {
+        const part = displayParts[index];
+        if (part.id === 'empty' || part.id === 'virtual-trailing-text') return;
+        
+        const updatedParts = displayParts.map((p, i) => i === index ? { ...p, collapsed: !p.collapsed } : p);
+        const realParts = updatedParts.filter(p => p.id !== 'virtual-trailing-text' && p.id !== 'empty');
+        
+        onUpdateConfig && onUpdateConfig(node.id, { parts: realParts });
     };
 
     const handleToggleCollapse = (e: React.MouseEvent) => {
@@ -278,6 +453,8 @@ export const NodeItem: React.FC<NodeItemProps> = React.memo(({
     const isMergeSelected = mergeIndex !== undefined && mergeIndex >= 0;
     const isAI = node.source === 'ai';
     const isInactive = node.isInactive;
+
+    const mainImageUrl = node.imageId ? imageUrls[node.imageId] : node.content;
 
     // --- Styling Logic ---
 
@@ -339,22 +516,16 @@ export const NodeItem: React.FC<NodeItemProps> = React.memo(({
     let headerDotColor = 'bg-blue-500';
     let headerText = 'Text Block';
 
-    if (node.type === 'image') {
-        headerDotColor = 'bg-amber-500';
-        headerText = 'Image Block';
-    }
-
-    if (isAI) {
-        headerDotColor = 'bg-indigo-500';
-        headerText = node.type === 'image' ? 'AI Generated Image' : 'AI Response';
-    }
-
-    if (isInactive) {
+    if (node.isInactive) {
         headerDotColor = 'bg-transparent border border-current';
         headerText = 'Deactivated';
+    } else if (isAI) {
+        headerDotColor = 'bg-indigo-500';
+        headerText = 'AI Block';
+    } else {
+        headerDotColor = 'bg-blue-500';
+        headerText = 'Block';
     }
-
-    const showImageViewer = node.type === 'image';
 
     const transitionClass = (isDragging || isResizing)
         ? 'transition-[box-shadow,border-color,transform,background-color] duration-150'
@@ -404,15 +575,15 @@ export const NodeItem: React.FC<NodeItemProps> = React.memo(({
 
     // Extract first line of content for collapsed view
     const firstLineContent = useMemo(() => {
-        if (node.type === 'image') return 'Image Content';
-        if (!node.content) return '';
+        if (!node.content && displayParts.some(p => p.type === 'image')) return 'Image Block';
+        if (!node.content) return 'Empty Block';
         const lines = node.content.split('\n');
         const firstLine = lines[0].trim();
         return firstLine.length > 30 ? firstLine.substring(0, 30) + '...' : firstLine;
-    }, [node.content, node.type]);
+    }, [node.content, displayParts]);
 
-    // Visibility logic for footer controls (hide on parent unless hovered or settings open)
-    const footerVisibilityClass = (hasOutgoingConnection && !showSettings && !node.isGenerating)
+    // Visibility logic for footer controls (hide on parent unless hovered or generating)
+    const footerVisibilityClass = (hasOutgoingConnection && !node.isGenerating)
         ? 'opacity-0 group-hover:opacity-100 transition-opacity duration-200'
         : '';
 
@@ -537,85 +708,22 @@ export const NodeItem: React.FC<NodeItemProps> = React.memo(({
             {/* --- Content --- */}
             {!node.collapsed ? (
             <div className={`px-4 pb-2 cursor-default relative z-10 flex-1 flex flex-col min-h-0 overflow-hidden ${isInactive ? 'opacity-50 pointer-events-none' : ''}`}>
-                {showImageViewer ? (
-                    <div
-                        className="w-full h-full relative group/image outline-none flex items-center justify-center"
-                        tabIndex={0}
-                        onPaste={(e) => {
-                            const items = e.clipboardData.items;
-                            for (const item of items) {
-                                if (item.type.startsWith('image/')) {
-                                    e.preventDefault();
-                                    e.stopPropagation();
-                                    if (onStartEdit) onStartEdit();
-                                    const blob = item.getAsFile();
-                                    if (blob) {
-                                        const reader = new FileReader();
-                                        reader.onload = async (evt) => {
-                                            if (evt.target?.result) {
-                                                const base64String = evt.target.result as string;
-                                                const imageId = uuidv4();
-                                                const mimeType = blob.type || 'image/jpeg';
-                                                
-                                                try {
-                                                    await saveImage(imageId, base64String, mimeType);
-                                                    onUpdateConfig && onUpdateConfig(node.id, { imageId, imageMimeType: mimeType });
-                                                } catch (error) {
-                                                    console.error('Failed to save pasted image:', error);
-                                                    onUpdate(node.id, base64String);
-                                                }
-                                            }
-                                        };
-                                        reader.readAsDataURL(blob);
-                                    }
-                                    break;
+                    <div 
+                        ref={contentWrapperRef}
+                        className="flex flex-col w-full h-full overflow-y-auto custom-scrollbar gap-2"
+                        onWheel={(e) => e.stopPropagation()}
+                        onMouseDown={(e) => {
+                            e.stopPropagation();
+                            // If clicking empty space, focus the last textarea
+                            if (e.target === e.currentTarget && contentWrapperRef.current) {
+                                const textareas = contentWrapperRef.current.querySelectorAll('textarea');
+                                if (textareas.length > 0) {
+                                    (textareas[textareas.length - 1] as HTMLTextAreaElement).focus();
                                 }
                             }
                         }}
+                        onPaste={handlePaste}
                     >
-                        {(node.content || node.imageId) ? (
-                            <div className={`rounded-lg overflow-hidden border border-transparent hover:border-blue-500/30 transition-colors relative flex justify-center items-center ${isDarkMode ? 'bg-black/20' : 'bg-gray-100'}`}>
-                                <img
-                                    src={imageUrl || node.content}
-                                    alt="Node content"
-                                    className="max-w-full max-h-full object-contain cursor-zoom-in"
-                                    draggable={false}
-                                    onClick={() => onViewImage && onViewImage(imageUrl || node.content)}
-                                />
-                                {/* Controls Overlay */}
-                                <div className="absolute inset-0 flex items-center justify-center bg-black/50 opacity-0 group-hover/image:opacity-100 transition-opacity gap-3">
-                                    <button
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                            if (onViewImage) onViewImage(imageUrl || node.content);
-                                        }}
-                                        className="bg-white/20 hover:bg-white/40 p-2 rounded-full backdrop-blur-sm transition-colors text-white"
-                                        title="View Fullscreen"
-                                    >
-                                        <Maximize2 className="w-4 h-4" />
-                                    </button>
-
-                                    <button
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                            fileInputRef.current?.click();
-                                        }}
-                                        className="bg-white/20 hover:bg-white/40 p-2 rounded-full backdrop-blur-sm transition-colors text-white"
-                                        title="Change Image"
-                                    >
-                                        <Upload className="w-4 h-4" />
-                                    </button>
-                                </div>
-                            </div>
-                        ) : (
-                            <div
-                                className={`w-full h-full rounded-xl border-2 border-dashed flex flex-col items-center justify-center gap-2 cursor-pointer transition-colors group ${isDarkMode ? 'border-gray-700 bg-white/5 hover:border-gray-500 hover:bg-white/10' : 'border-gray-300 hover:border-gray-400 hover:bg-black/5'}`}
-                                onClick={() => fileInputRef.current?.click()}
-                            >
-                                <ImageIcon className={`w-8 h-8 transition-colors ${isDarkMode ? 'text-gray-400 group-hover:text-gray-200' : 'text-gray-300 group-hover:text-gray-500'}`} />
-                                <span className={`text-[10px] font-medium uppercase tracking-wider transition-colors ${isDarkMode ? 'text-gray-400 group-hover:text-gray-200' : 'text-gray-400 group-hover:text-gray-600'}`}>Upload or Paste Image</span>
-                            </div>
-                        )}
                         <input
                             ref={fileInputRef}
                             type="file"
@@ -623,86 +731,301 @@ export const NodeItem: React.FC<NodeItemProps> = React.memo(({
                             className="hidden"
                             onChange={handleImageUpload}
                         />
-                    </div>
-                ) : (
-                    <div 
-                        ref={contentWrapperRef}
-                        className="flex flex-col w-full h-full overflow-y-auto custom-scrollbar gap-2"
-                        onWheel={(e) => e.stopPropagation()}
-                        onMouseDown={(e) => {
-                            e.stopPropagation();
-                            // If clicking empty space, focus last text area or create new one?
-                            // For now simple propagation stop to allow selection
-                        }}
-                    >
                         {displayParts.map((part, index) => {
+                            const isDraggingPart = draggedPartIndex === index;
+                            const isDragOver = dragOverIndex === index;
+                            const dropIndicatorClass = isDraggingPart ? 'opacity-20 grayscale scale-95' : '';
+                            const dragOverClass = isDragOver ? (index < draggedPartIndex! ? 'border-t-2 border-t-blue-500 shadow-[0_-4px_10px_-4px_rgba(59,130,246,0.5)]' : 'border-b-2 border-b-blue-500 shadow-[0_4px_10px_-4px_rgba(59,130,246,0.5)]') : '';
+                            
                             if (part.type === 'text') {
+                                const isCollapsed = part.collapsed;
+                                const firstLine = part.content.split('\n')[0] || 'Empty Text';
+                                const displaySummary = firstLine.length > 40 ? firstLine.substring(0, 40) + '...' : firstLine;
+
                                 return (
-                                    <textarea
+                                    <div
                                         key={part.id || index}
-                                        value={part.content}
-                                        onChange={(e) => {
-                                            const newContent = e.target.value;
-                                            // Deep copy parts
-                                            const newParts = [...(node.parts || displayParts)]; // displayParts is fallback
-                                            // If we are editing a fallback part, we need to ensure structure is promoted to parts
-                                            // The simplest way is to construct a full parts array
-                                            
-                                            // If node.parts didn't exist, we are creating it now based on displayParts
-                                            const updatedParts = newParts.map((p, i) => i === index ? { ...p, content: newContent } : p);
-                                            
-                                            // Also update main content string for search/compat
-                                            const fullText = updatedParts.filter((p: any) => p.type === 'text').map((p: any) => p.content).join('\n');
-                                            
-                                            onUpdateConfig && onUpdateConfig(node.id, { 
-                                                parts: updatedParts,
-                                                content: fullText
-                                            });
-                                        }}
-                                        placeholder={isAI ? "AI response..." : "Type here..."}
-                                        readOnly={isInactive}
-                                        className={`w-full bg-transparent ${textColor} text-sm font-normal leading-relaxed resize-none focus:outline-none select-text cursor-text ${placeholderColor} flex-shrink-0 overflow-hidden`}
-                                        rows={1}
-                                        onMouseDown={(e) => e.stopPropagation()}
-                                        onFocus={() => {
-                                            setIsFocused(true);
-                                            if (onStartEdit) onStartEdit();
-                                        }}
-                                        onBlur={() => setIsFocused(false)}
-                                    />
+                                        draggable={!isInactive && part.id !== 'virtual-trailing-text' && part.id !== 'empty' && isCollapsed}
+                                        onDragStart={(e) => handlePartDragStart(e, index)}
+                                        onDragOver={(e) => handlePartDragOver(e, index)}
+                                        onDragLeave={() => setDragOverIndex(null)}
+                                        onDrop={(e) => handlePartDrop(e, index)}
+                                        onDragEnd={handlePartDragEnd}
+                                        className={`relative group/part transition-all ${dropIndicatorClass} ${dragOverClass} hover:bg-black/5 dark:hover:bg-white/10 rounded-xl px-2 py-2 border-l-2 border-transparent hover:border-blue-500/30 mb-1 last:mb-0 w-full`}
+                                    >
+                                        {/* Actions for Part - Sticky Header */}
+                                        <div className={!isCollapsed 
+                                            ? "sticky top-2 right-0 ml-auto w-fit h-0 overflow-visible z-20" 
+                                            : "absolute top-1/2 right-2 -translate-y-1/2 z-20"
+                                        }>
+                                            <div className={`flex items-center gap-1 opacity-0 group-hover/part:opacity-100 transition-all duration-200 ${!isCollapsed ? 'absolute right-2 top-0' : ''}`}>
+                                                {/* Collapse Toggle */}
+                                                {part.id !== 'virtual-trailing-text' && part.id !== 'empty' && (
+                                                    <button
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            handleTogglePartCollapse(index);
+                                                        }}
+                                                        className={`w-8 h-8 flex items-center justify-center rounded-full transition-all duration-200 ${
+                                                            isDarkMode 
+                                                                ? 'hover:bg-white/10 text-gray-400 hover:text-white' 
+                                                                : 'hover:bg-black/5 text-gray-400 hover:text-gray-900'
+                                                        }`}
+                                                        onMouseDown={(e) => e.stopPropagation()}
+                                                        title={isCollapsed ? "Expand Part" : "Collapse Part"}
+                                                    >
+                                                        {isCollapsed ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />}
+                                                    </button>
+                                                )}
+
+                                                {/* Delete Button for Text Part */}
+                                                {(!isInactive && part.id !== 'virtual-trailing-text' && part.id !== 'empty') && (
+                                                    <button
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            const filtered = displayParts.filter((_, i) => i !== index)
+                                                                .filter(p => {
+                                                                    if (p.id === 'virtual-trailing-text' || p.id === 'empty') {
+                                                                        return p.content && p.content.trim().length > 0;
+                                                                    }
+                                                                    return true;
+                                                                });
+                                                            
+                                                            const partsToSave = filtered;
+                                                            const fullText = partsToSave.filter((p: any) => p.type === 'text').map((p: any) => p.content).join('\n');
+                                                            onUpdateConfig && onUpdateConfig(node.id, { 
+                                                                parts: partsToSave,
+                                                                content: fullText
+                                                            });
+                                                        }}
+                                                        className={`w-8 h-8 flex items-center justify-center rounded-full transition-all duration-200 ${
+                                                            isDarkMode 
+                                                                ? 'hover:bg-white/10 text-gray-400 hover:text-red-400' 
+                                                                : 'hover:bg-black/5 text-gray-400 hover:text-red-500'
+                                                        }`}
+                                                        onMouseDown={(e) => e.stopPropagation()}
+                                                        title="Delete Text Part"
+                                                    >
+                                                        <Trash2 className="w-3.5 h-3.5" />
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
+                                        {!isCollapsed ? (
+                                            <textarea
+                                                value={part.content}
+                                                onChange={(e) => {
+                                                    const ta = e.target;
+                                                    const wrapper = contentWrapperRef.current;
+                                                    const scrollTop = wrapper ? wrapper.scrollTop : 0;
+                                                    
+                                                    // Handle auto-resize on input
+                                                    const offset = ta.offsetHeight - ta.clientHeight;
+                                                    ta.style.height = 'auto';
+                                                    ta.style.height = (ta.scrollHeight + offset) + 'px';
+                                                    
+                                                    if (wrapper) wrapper.scrollTop = scrollTop;
+                                                    
+                                                    const newContent = ta.value;
+                                                    const newParts = [...displayParts];
+                                                    const updatedParts = newParts.map((p, i) => {
+                                                        if (i === index) {
+                                                            let newId = p.id;
+                                                            if (newId === 'virtual-trailing-text' || newId === 'empty') {
+                                                                newId = uuidv4();
+                                                            }
+                                                            return { ...p, content: newContent, id: newId };
+                                                        }
+                                                        return p;
+                                                    });
+                                                    
+                                                    const partsToSave = updatedParts.filter(p => p.id !== 'virtual-trailing-text' && p.id !== 'empty');
+                                                    const fullText = partsToSave.filter((p: any) => p.type === 'text').map((p: any) => p.content).join('\n');
+                                                    
+                                                    onUpdateConfig && onUpdateConfig(node.id, { 
+                                                        parts: partsToSave,
+                                                        content: fullText
+                                                    });
+                                                }}
+                                                placeholder="Type here..."
+                                                onPaste={handlePaste}
+                                                readOnly={isInactive}
+                                                className={`w-full bg-transparent ${textColor} text-sm font-normal leading-relaxed resize-none focus:outline-none select-text cursor-text ${placeholderColor} overflow-hidden whitespace-pre-wrap break-words min-w-0 pr-8`}
+                                                rows={1}
+                                                onMouseDown={(e) => e.stopPropagation()}
+                                                onFocus={() => {
+                                                    setIsFocused(true);
+                                                    if (onStartEdit) onStartEdit();
+                                                }}
+                                                onBlur={() => setIsFocused(false)}
+                                            />
+                                        ) : (
+                                            <div 
+                                                className={`text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'} italic py-1 cursor-pointer`}
+                                                onClick={() => handleTogglePartCollapse(index)}
+                                            >
+                                                {displaySummary}
+                                            </div>
+                                        )}
+                                        
+
+                                    </div>
                                 );
                             } else if (part.type === 'image') {
                                 const url = (part as any).__previewUrl || (part.imageId ? imageUrls[part.imageId] : part.content);
-                                if (!url) return null; // Loading or missing
-
+                                const isDraggingPart = draggedPartIndex === index;
+                                const isDragOver = dragOverIndex === index;
+                                const dropIndicatorClass = isDraggingPart ? 'opacity-20 grayscale scale-95' : '';
+                                const dragOverClass = isDragOver ? (index < draggedPartIndex! ? 'border-t-2 border-t-blue-500 shadow-[0_-4px_10px_-4px_rgba(59,130,246,0.5)]' : 'border-b-2 border-b-blue-500 shadow-[0_4px_10px_-4px_rgba(59,130,246,0.5)]') : '';
+                                const isCollapsed = part.collapsed;
+                                
                                 return (
-                                    <div key={part.id || index} className="relative self-start h-auto overflow-hidden rounded-lg flex-shrink-0 bg-black/5 dark:bg-white/5 group/image">
-                                        <img 
-                                            src={url} 
-                                            alt="Content" 
-                                            className="object-contain max-w-full max-h-[300px] cursor-pointer" 
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                if (onViewImage) onViewImage(url);
-                                            }}
-                                        />
-                                        <button
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                if (onViewImage) onViewImage(url);
-                                            }}
-                                            className="absolute top-2 right-2 bg-black/50 hover:bg-black/70 p-1.5 rounded-full backdrop-blur-sm transition-colors text-white opacity-0 group-hover/image:opacity-100"
-                                            title="View Fullscreen"
-                                        >
-                                            <Maximize2 className="w-3 h-3" />
-                                        </button>
+                                    <div
+                                        key={part.id || index}
+                                        draggable={!isInactive && isCollapsed}
+                                        onDragStart={(e) => handlePartDragStart(e, index)}
+                                        onDragOver={(e) => handlePartDragOver(e, index)}
+                                        onDragLeave={() => setDragOverIndex(null)}
+                                        onDrop={(e) => handlePartDrop(e, index)}
+                                        onDragEnd={handlePartDragEnd}
+                                        className={`relative flex flex-col items-center group/image transition-all ${dropIndicatorClass} ${dragOverClass} hover:bg-black/5 dark:hover:bg-white/10 rounded-xl px-2 border-l-2 border-transparent hover:border-blue-500/30 mb-2 last:mb-0 w-full`}
+                                    >
+                                        {!isCollapsed ? (
+                                            url ? (
+                                                <div className="relative py-2 w-full flex justify-center">
+                                                    <img 
+                                                        src={url} 
+                                                        alt="Content" 
+                                                        className="object-contain w-full max-w-[268px] max-h-[400px] rounded-lg cursor-pointer transition-transform hover:scale-[1.01] block" 
+                                                        draggable={false}
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            if (onViewImage) {
+                                                                onViewImage(url);
+                                                            }
+                                                        }}
+                                                    />
+                                                    <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover/image:opacity-100 transition-all duration-200">
+                                                        {/* Collapse Toggle */}
+                                                        <button
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                handleTogglePartCollapse(index);
+                                                            }}
+                                                            className={`w-8 h-8 flex items-center justify-center rounded-full transition-all duration-200 ${
+                                                                isDarkMode
+                                                                    ? 'hover:bg-white/10 text-gray-400 hover:text-white'
+                                                                    : 'hover:bg-black/5 text-gray-400 hover:text-gray-900'
+                                                            }`}
+                                                            onMouseDown={(e) => e.stopPropagation()}
+                                                            title="Collapse Image"
+                                                        >
+                                                            <ChevronUp className="w-3.5 h-3.5" />
+                                                        </button>
+
+                                                        <button
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                const filtered = displayParts.filter((p, i) => {
+                                                                    if (i === index) return false;
+                                                                    if (p.id === 'virtual-trailing-text' || p.id === 'empty') {
+                                                                        return p.content && p.content.trim().length > 0;
+                                                                    }
+                                                                    return true;
+                                                                });
+                                                                
+                                                                const consolidated = consolidateTextParts(filtered);
+                                                                const fullText = consolidated.filter((p: any) => p.type === 'text').map((p: any) => p.content).join('\n');
+                                                                onUpdateConfig && onUpdateConfig(node.id, { 
+                                                                    parts: consolidated,
+                                                                    content: fullText
+                                                                });
+                                                            }}
+                                                            className={`w-8 h-8 flex items-center justify-center rounded-full transition-all duration-200 ${
+                                                                isDarkMode
+                                                                    ? 'hover:bg-white/10 text-gray-400 hover:text-red-400'
+                                                                    : 'hover:bg-black/5 text-gray-400 hover:text-red-500'
+                                                            }`}
+                                                            onMouseDown={(e) => e.stopPropagation()}
+                                                            title="Delete Image"
+                                                        >
+                                                            <Trash2 className="w-3.5 h-3.5" />
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            ) : (
+                                                <div 
+                                                    className={`w-full py-8 border-2 border-dashed flex flex-col items-center justify-center gap-2 cursor-pointer transition-colors rounded-lg relative ${isDarkMode ? 'border-gray-700 hover:border-gray-500 bg-white/5' : 'border-gray-200 hover:border-gray-400 bg-black/5'}`}
+                                                    onClick={() => {
+                                                        (nodeRef.current as any)._uploadingPartIndex = index;
+                                                        fileInputRef.current?.click();
+                                                    }}
+                                                >
+                                                    <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover/image:opacity-100 transition-all duration-200">
+                                                        <button
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                const filtered = displayParts.filter((p, i) => {
+                                                                    if (i === index) return false;
+                                                                    if (p.id === 'virtual-trailing-text' || p.id === 'empty') {
+                                                                        return p.content && p.content.trim().length > 0;
+                                                                    }
+                                                                    return true;
+                                                                });
+                                                                
+                                                                const consolidated = consolidateTextParts(filtered);
+                                                                const fullText = consolidated.filter((p: any) => p.type === 'text').map((p: any) => p.content).join('\n');
+                                                                onUpdateConfig && onUpdateConfig(node.id, { 
+                                                                    parts: consolidated,
+                                                                    content: fullText
+                                                                });
+                                                            }}
+                                                            className={`w-8 h-8 flex items-center justify-center rounded-full transition-all duration-200 ${
+                                                                isDarkMode 
+                                                                    ? 'hover:bg-white/10 text-gray-400 hover:text-red-400' 
+                                                                    : 'hover:bg-black/5 text-gray-400 hover:text-red-500'
+                                                            }`}
+                                                            onMouseDown={(e) => e.stopPropagation()}
+                                                            title="Remove Placeholder"
+                                                        >
+                                                            <X className="w-3.5 h-3.5" />
+                                                        </button>
+                                                    </div>
+                                                    <ImageIcon className="w-6 h-6 text-gray-400" />
+                                                    <span className="text-[10px] uppercase tracking-wider text-gray-500 font-bold">Upload Image</span>
+                                                </div>
+                                            )
+                                        ) : (
+                                            <div 
+                                                className={`w-full py-2 flex items-center justify-between px-2 cursor-pointer group/collapsed-img`}
+                                                onClick={() => handleTogglePartCollapse(index)}
+                                            >
+                                                <div className="flex items-center gap-2">
+                                                    <ImageIcon className="w-3.5 h-3.5 text-blue-500" />
+                                                    <span className={`text-xs font-medium ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                                                        Image Content
+                                                    </span>
+                                                </div>
+                                                <button
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        handleTogglePartCollapse(index);
+                                                    }}
+                                                    className={`w-8 h-8 flex items-center justify-center rounded-full opacity-0 group-hover/collapsed-img:opacity-100 transition-all ${
+                                                        isDarkMode ? 'hover:bg-white/10 text-gray-400 hover:text-white' : 'hover:bg-black/5 text-gray-400 hover:text-gray-900'
+                                                    }`}
+                                                    onMouseDown={(e) => e.stopPropagation()}
+                                                >
+                                                    <ChevronDown className="w-3.5 h-3.5" />
+                                                </button>
+                                            </div>
+                                        )}
                                     </div>
                                 );
                             }
                             return null;
                         })}
                     </div>
-                )}
             </div>
             ) : (
                 <div className={`px-4 pb-3 pt-0 cursor-default relative z-10 ${isInactive ? 'opacity-50' : ''}`}>

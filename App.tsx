@@ -214,17 +214,33 @@ const App: React.FC = () => {
             const storedBaseUrl = localStorage.getItem(`${provider}_base_url`);
             const storedModels = localStorage.getItem(`${provider}_models`);
 
-            if (storedKey || storedBaseUrl || storedModels) {
-                setProviderConfigs(prev => ({
+            setProviderConfigs(prev => {
+                let parsedModels = storedModels ? JSON.parse(storedModels) : prev[provider].models;
+                
+                // Migration: Ensure all models have unique IDs
+                let hasMigrated = false;
+                parsedModels = parsedModels.map((m: any) => {
+                    if (!m.id) {
+                        hasMigrated = true;
+                        return { ...m, id: uuidv4() };
+                    }
+                    return m;
+                });
+
+                if (hasMigrated) {
+                    localStorage.setItem(`${provider}_models`, JSON.stringify(parsedModels));
+                }
+
+                return {
                     ...prev,
                     [provider]: {
                         ...prev[provider],
                         key: storedKey || prev[provider].key,
-                        baseUrl: storedBaseUrl || '',
-                        models: storedModels ? JSON.parse(storedModels) : prev[provider].models
+                        baseUrl: (provider === 'openai' && storedBaseUrl) ? storedBaseUrl : prev[provider].baseUrl,
+                        models: parsedModels
                     }
-                }));
-            }
+                };
+            });
         };
         loadConfig('openai');
         loadConfig('gemini');
@@ -311,7 +327,8 @@ const App: React.FC = () => {
             if (conf.models) {
                 conf.models.forEach((m: any) => {
                     if (m.enabled) {
-                        models.push({ value: m.value, label: m.label });
+                        // Use unique ID as the value for the dropdown, but keep label for UI
+                        models.push({ value: m.id || m.value, label: m.label });
                     }
                 });
             }
@@ -322,7 +339,7 @@ const App: React.FC = () => {
     // Determine Default Model (Top-most configured model from any provider)
     const defaultModel = useMemo(() => {
         for (const config of Object.values(providerConfigs) as ProviderConfig[]) {
-            if (config.models.length > 0) return config.models[0].value;
+            if (config.models.length > 0) return config.models[0].id || config.models[0].value;
         }
         return 'gemini-2.0-flash';
     }, [providerConfigs]);
@@ -570,7 +587,7 @@ const App: React.FC = () => {
         }
     };
 
-    const handleSaveCanvas = () => {
+    const handleSaveCanvas = async () => {
         const data = {
             nodes: nodesRef.current,
             edges: edgesRef.current,
@@ -580,15 +597,40 @@ const App: React.FC = () => {
             providerConfigs,
             version: "1.1"
         };
-        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = `Block-Canvas-${new Date().getFullYear()}${(new Date().getMonth() + 1).toString().padStart(2, '0')}${new Date().getDate().toString().padStart(2, '0')}-${new Date().getHours().toString().padStart(2, '0')}${new Date().getMinutes().toString().padStart(2, '0')}.json`;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        URL.revokeObjectURL(url);
+        const jsonString = JSON.stringify(data, null, 2);
+
+        if ('showSaveFilePicker' in window) {
+            try {
+                const handle = await (window as any).showSaveFilePicker({
+                    suggestedName: `Block-Canvas-${new Date().getFullYear()}${(new Date().getMonth() + 1).toString().padStart(2, '0')}${new Date().getDate().toString().padStart(2, '0')}-${new Date().getHours().toString().padStart(2, '0')}${new Date().getMinutes().toString().padStart(2, '0')}.json`,
+                    types: [{
+                        description: 'Block Canvas Files',
+                        accept: { 'application/json': ['.json'] },
+                    }],
+                });
+                
+                const writable = await handle.createWritable();
+                await writable.write(jsonString);
+                await writable.close();
+                
+                setFileHandle(handle);
+            } catch (err: any) {
+                if (err.name !== 'AbortError') {
+                    console.error("Save failed", err);
+                    alert("Failed to save file.");
+                }
+            }
+        } else {
+            const blob = new Blob([jsonString], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `Block-Canvas-${new Date().getFullYear()}${(new Date().getMonth() + 1).toString().padStart(2, '0')}${new Date().getDate().toString().padStart(2, '0')}-${new Date().getHours().toString().padStart(2, '0')}${new Date().getMinutes().toString().padStart(2, '0')}.json`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+        }
     };
 
     const handleLoadCanvas = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1021,14 +1063,16 @@ const App: React.FC = () => {
                             await saveImage(imageId, base64String, mimeType);
                             const newNode: NodeData = {
                                 id: uuidv4(),
-                                type: 'image',
+                                type: 'text',
                                 source: 'user',
-                                content: '', // Clear base64
-                                imageId: imageId,
-                                imageMimeType: mimeType,
+                                content: '', 
+                                parts: [
+                                    { id: uuidv4(), type: 'image', content: '', imageId: imageId, mimeType: mimeType },
+                                    { id: uuidv4(), type: 'text', content: '' }
+                                ],
                                 position: { x: pos.x - NODE_WIDTH / 2, y: pos.y - 75 },
                                 width: NODE_WIDTH,
-                                height: 200,
+                                height: 250,
                                 ports: [uuidv4()],
                                 model: defaultModel
                             };
@@ -1038,12 +1082,16 @@ const App: React.FC = () => {
                             // Fallback if IDB fails
                             const newNode: NodeData = {
                                 id: uuidv4(),
-                                type: 'image',
+                                type: 'text',
                                 source: 'user',
-                                content: base64String,
+                                content: '',
+                                parts: [
+                                    { id: uuidv4(), type: 'image', content: base64String },
+                                    { id: uuidv4(), type: 'text', content: '' }
+                                ],
                                 position: { x: pos.x - NODE_WIDTH / 2, y: pos.y - 75 },
                                 width: NODE_WIDTH,
-                                height: 200,
+                                height: 250,
                                 ports: [uuidv4()],
                                 model: defaultModel
                             };
@@ -1058,9 +1106,58 @@ const App: React.FC = () => {
 
         saveHistory();
 
+        // 1. Check for internal image drag-and-drop
+        const internalImageId = e.dataTransfer.getData('application/x-block-image-id');
+        if (internalImageId) {
+            const mimeType = e.dataTransfer.getData('application/x-block-image-mime') || 'image/jpeg';
+            const pos = getCanvasPos(e.clientX, e.clientY, offset, scale);
+            const newNode: NodeData = {
+                id: uuidv4(),
+                type: 'text',
+                source: 'user',
+                content: '',
+                parts: [
+                    { id: uuidv4(), type: 'image', content: '', imageId: internalImageId, mimeType: mimeType },
+                    { id: uuidv4(), type: 'text', content: '' }
+                ],
+                position: { x: pos.x - NODE_WIDTH / 2, y: pos.y - 75 },
+                width: NODE_WIDTH,
+                height: 250,
+                ports: [uuidv4()],
+                model: defaultModel
+            };
+            setNodes(prev => [...prev, newNode]);
+            return;
+        }
+
         const text = e.dataTransfer.getData('text/plain');
         if (text) {
             const pos = getCanvasPos(e.clientX, e.clientY, offset, scale);
+
+            // 2. Check if text looks like an image URL or data URL
+            const isImageUrl = text.startsWith('data:image/') || 
+                              text.startsWith('blob:') || 
+                              /\.(jpeg|jpg|gif|png|webp|svg)($|\?)/i.test(text);
+
+            if (isImageUrl) {
+                const newNode: NodeData = {
+                    id: uuidv4(),
+                    type: 'text',
+                    source: 'user',
+                    content: '',
+                    parts: [
+                        { id: uuidv4(), type: 'image', content: text },
+                        { id: uuidv4(), type: 'text', content: '' }
+                    ],
+                    position: { x: pos.x - NODE_WIDTH / 2, y: pos.y - 75 },
+                    width: NODE_WIDTH,
+                    height: 250,
+                    ports: [uuidv4()],
+                    model: defaultModel
+                };
+                setNodes(prev => [...prev, newNode]);
+                return;
+            }
 
             const newNode: NodeData = {
                 id: uuidv4(),
@@ -1098,25 +1195,6 @@ const App: React.FC = () => {
         setContextMenu(null);
     };
 
-    const handleAddImageNodeAtCursor = () => {
-        if (!contextMenu) return;
-        saveHistory();
-        const pos = getCanvasPos(contextMenu.x, contextMenu.y, offset, scale);
-        const newNode: NodeData = {
-            id: uuidv4(),
-            type: 'image',
-            source: 'user',
-            content: '',
-            position: { x: pos.x, y: pos.y },
-            width: NODE_WIDTH,
-            height: 200,
-            ports: [uuidv4()],
-            model: defaultModel
-        };
-        setNodes((prev) => [...prev, newNode]);
-        setContextMenu(null);
-    };
-
     const handleGlobalAutoLayout = () => {
         saveHistory();
         const organized = performLayout(nodesRef.current, edgesRef.current, 100, 100);
@@ -1142,7 +1220,15 @@ const App: React.FC = () => {
         saveHistory();
         setNodes((prev) => prev.map((n) => {
             if (n.id === id) {
-                return { ...n, content: '', type: 'text', source: 'user' };
+                return { 
+                    ...n, 
+                    content: '', 
+                    type: 'text', 
+                    source: 'user',
+                    parts: [],
+                    imageId: undefined,
+                    imageMimeType: undefined
+                };
             }
             return n;
         }));
@@ -1391,22 +1477,12 @@ const App: React.FC = () => {
 
             for (const part of responseParts) {
                 if (part.type === 'text') {
-                    // If the last part is text, append to it
-                    const lastPart = currentParts[currentParts.length - 1];
-                    if (lastPart && lastPart.type === 'text') {
-                         if (lastPart.content.trim()) {
-                            lastPart.content += '\n\n' + part.content;
-                        } else {
-                            lastPart.content = part.content;
-                        }
-                    } else {
-                        // Otherwise create new text part
-                        currentParts.push({
-                            id: uuidv4(),
-                            type: 'text',
-                            content: part.content
-                        });
-                    }
+                    // Create new text part for each AI response segment (stop merging)
+                    currentParts.push({
+                        id: uuidv4(),
+                        type: 'text',
+                        content: part.content
+                    });
                 } else if (part.type === 'image') {
                     if (part.content && part.content.startsWith && part.content.startsWith('data:image/')) {
                         const mimeMatch = part.content.match(/^data:([^;]+);base64,/);
@@ -1445,7 +1521,15 @@ const App: React.FC = () => {
                 }
             }
 
-            
+            // Ensure we have a trailing text part for user to continue typing
+            if (currentParts.length > 0 && currentParts[currentParts.length - 1].type !== 'text') {
+                currentParts.push({
+                    id: uuidv4(),
+                    type: 'text',
+                    content: '',
+                    source: 'user'
+                });
+            }
 
             // Update content string for backward compatibility / search
             const fullContent = currentParts
@@ -1566,12 +1650,16 @@ const App: React.FC = () => {
                             if (event.target?.result) {
                                 const newNode: NodeData = {
                                     id: uuidv4(),
-                                    type: 'image',
+                                    type: 'text',
                                     source: 'user',
-                                    content: event.target.result as string,
+                                    content: '',
+                                    parts: [
+                                        { id: uuidv4(), type: 'image', content: event.target.result as string },
+                                        { id: uuidv4(), type: 'text', content: '' }
+                                    ],
                                     position: { x: currentMousePos.x, y: currentMousePos.y },
                                     width: NODE_WIDTH,
-                                    height: 200,
+                                    height: 250,
                                     ports: [uuidv4()],
                                     model: defaultModel
                                 };
@@ -1734,10 +1822,7 @@ const App: React.FC = () => {
                     {contextMenu.type === 'canvas' && (
                         <>
                             <button onClick={handleAddNodeAtCursor} className={`w-full text-left px-4 py-2.5 text-xs font-medium transition-colors ${isDarkMode ? 'hover:bg-white/10 hover:text-blue-400' : 'hover:bg-black/5 hover:text-blue-600'}`}>
-                                Add Text Block
-                            </button>
-                            <button onClick={handleAddImageNodeAtCursor} className={`w-full text-left px-4 py-2.5 text-xs font-medium transition-colors ${isDarkMode ? 'hover:bg-white/10 hover:text-blue-400' : 'hover:bg-black/5 hover:text-blue-600'}`}>
-                                Add Image Block
+                                Add Block
                             </button>
                             <div className={`h-px my-1 ${isDarkMode ? 'bg-white/5' : 'bg-gray-200'}`} />
                             <button onClick={handleGlobalAutoLayout} className={`w-full text-left px-4 py-2.5 text-xs font-medium transition-colors ${isDarkMode ? 'hover:bg-white/10 hover:text-blue-400' : 'hover:bg-black/5 hover:text-blue-600'}`}>

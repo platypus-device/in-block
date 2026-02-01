@@ -31,6 +31,7 @@ export interface ContentPart {
   content: string; // Text content or empty for image
   imageId?: string; // For image parts
   mimeType?: string;
+  collapsed?: boolean;
 }
 
 export interface GroupData {
@@ -61,6 +62,7 @@ export interface CanvasState {
 export type ProviderType = 'gemini' | 'openai' | 'anthropic';
 
 export interface ModelConfig {
+  id: string; // Unique ID for this configuration instance
   value: string;
   label: string;
   enabled: boolean;

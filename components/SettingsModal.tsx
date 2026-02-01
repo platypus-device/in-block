@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { Moon, Sun, Loader2, ArrowRight, X } from 'lucide-react';
+import { Moon, Sun, Loader2, ArrowRight, X, Edit3 } from 'lucide-react';
 import { ProviderConfig, ProviderType, ModelConfig } from '../types';
 import { getGeminiModels, getOpenAIModels, getAnthropicModels, AIModel } from '../services/ai';
 import { ModelListItem } from './settings/ModelListItem';
 import { TutorialCard, ShortcutItem } from './settings/SettingsComponents';
+import { v4 as uuidv4 } from 'uuid';
 
 interface SettingsModalProps {
     isOpen: boolean;
@@ -35,6 +36,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
     // Expanded Model & Config State
     const [expandedModelId, setExpandedModelId] = useState<string | null>(null);
+    const [editingModelConfigId, setEditingModelConfigId] = useState<string | null>(null);
 
     // Config Form State
     const [modelConfigForm, setModelConfigForm] = useState<{
@@ -106,56 +108,66 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     // --- Handlers ---
 
     const handleExpandModel = (model: AIModel) => {
-        if (expandedModelId === model.id) {
+        if (expandedModelId === model.id && !editingModelConfigId) {
             setExpandedModelId(null);
             return;
         }
+        
         setExpandedModelId(model.id);
+        setEditingModelConfigId(null);
         setJsonError(null);
 
-        // Check if already configured
+        // Check if already configured (just for defaulting the label)
         const existingConfig = providerConfigs[selectedProvider].models.find(m => m.value === model.id);
 
         const outputIsImage = model.id.toLowerCase().includes('image') && !model.id.toLowerCase().includes('vision');
         const defaultType = outputIsImage ? 'image' : 'text';
 
-        if (existingConfig) {
-            // Prepare JSON config string
-            const configObj = existingConfig.config || {};
-
-            setModelConfigForm({
-                label: existingConfig.label,
-                type: existingConfig.type || defaultType,
-                jsonConfig: JSON.stringify(configObj, null, 2)
-            });
-        } else {
-            // Updated Provider-specific Defaults
-            let defaultConfig = {};
-            if (selectedProvider === 'gemini') {
-                defaultConfig = {
-                    generationConfig: {
-                        temperature: 0.7,
-                        topP: 0.95
-                    }
-                };
-            } else if (selectedProvider === 'openai' || selectedProvider === 'custom') {
-                defaultConfig = {
+        // Updated Provider-specific Defaults
+        let defaultConfig = {};
+        if (selectedProvider === 'gemini') {
+            defaultConfig = {
+                generationConfig: {
                     temperature: 0.7,
-                    top_p: 1
-                };
-            } else if (selectedProvider === 'anthropic') {
-                defaultConfig = {
-                    temperature: 0.7,
-                    // Anthropic uses system for system instructions, but we handle it via config if needed
-                };
-            }
-
-            setModelConfigForm({
-                label: model.displayName,
-                type: defaultType,
-                jsonConfig: JSON.stringify(defaultConfig, null, 2)
-            });
+                    topP: 0.95
+                }
+            };
+        } else if (selectedProvider === 'openai' || selectedProvider === 'custom') {
+            defaultConfig = {
+                temperature: 0.7,
+                top_p: 1
+            };
+        } else if (selectedProvider === 'anthropic') {
+            defaultConfig = {
+                temperature: 0.7,
+            };
         }
+
+        setModelConfigForm({
+            label: model.displayName,
+            type: defaultType,
+            jsonConfig: JSON.stringify(defaultConfig, null, 2)
+        });
+    };
+
+    const handleEditModel = (provider: ProviderType, modelConfig: ModelConfig) => {
+        setSelectedProvider(provider);
+        setExpandedModelId(modelConfig.value);
+        setEditingModelConfigId(modelConfig.id);
+        // Remove: setActiveSettingsTab('available_models'); 
+        setJsonError(null);
+
+        setModelConfigForm({
+            label: modelConfig.label,
+            type: modelConfig.type || 'text',
+            jsonConfig: JSON.stringify(modelConfig.config || {}, null, 2)
+        });
+    };
+
+    const handleCancelEdit = () => {
+        setEditingModelConfigId(null);
+        setExpandedModelId(null);
+        setJsonError(null);
     };
 
     const handleJsonChange = (value: string) => {
@@ -176,21 +188,27 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
             setProviderConfigs(prev => {
                 const config = prev[selectedProvider];
-                const existingIndex = config.models.findIndex(m => m.value === modelId);
                 let newModels = [...config.models];
 
-                const newModelConfig: ModelConfig = {
-                    value: modelId,
-                    label: modelConfigForm.label || modelId,
-                    enabled: true,
-                    // Use unified config object
-                    config: parsedConfig,
-                    type: modelConfigForm.type,
-                };
-
-                if (existingIndex >= 0) {
-                    newModels[existingIndex] = newModelConfig;
+                if (editingModelConfigId) {
+                    const existingIndex = newModels.findIndex(m => m.id === editingModelConfigId);
+                    if (existingIndex >= 0) {
+                        newModels[existingIndex] = {
+                            ...newModels[existingIndex],
+                            label: modelConfigForm.label || modelId,
+                            config: parsedConfig,
+                            type: modelConfigForm.type,
+                        };
+                    }
                 } else {
+                    const newModelConfig: ModelConfig = {
+                        id: uuidv4(),
+                        value: modelId,
+                        label: modelConfigForm.label || modelId,
+                        enabled: true,
+                        config: parsedConfig,
+                        type: modelConfigForm.type,
+                    };
                     newModels.push(newModelConfig);
                 }
 
@@ -204,16 +222,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     }
                 };
             });
+            
+            // Close expansion after save
+            setExpandedModelId(null);
+            setEditingModelConfigId(null);
+            
         } catch (e) {
             console.error("Failed to parse JSON config", e);
             setJsonError("Invalid JSON");
         }
     };
 
-    const handleDeleteModel = (provider: ProviderType, modelValue: string) => {
+    const handleDeleteModel = (provider: ProviderType, modelId: string) => {
         setProviderConfigs(prev => {
             const config = prev[provider];
-            const newModels = config.models.filter(m => m.value !== modelValue);
+            const newModels = config.models.filter(m => m.id !== modelId);
             localStorage.setItem(`${provider}_models`, JSON.stringify(newModels));
             return {
                 ...prev,
@@ -310,11 +333,75 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
     // --- Render Helpers ---
 
-
     // Unified Glass Panel Style
     const modalClass = isDarkMode
         ? 'bg-gray-900/95 border-gray-700 text-gray-200 backdrop-blur-2xl ring-1 ring-white/5'
         : 'bg-white/95 border-gray-200 text-gray-800 backdrop-blur-2xl ring-1 ring-black/5';
+
+    const renderModelConfigEditor = (modelId: string, isUpdate: boolean = false) => {
+        return (
+            <div className={`mt-3 p-5 rounded-2xl border flex flex-col gap-5 shadow-sm animate-in slide-in-from-top-2 duration-200 ${isDarkMode ? 'bg-black/20 border-gray-700' : 'bg-gray-50 border-gray-200'}`} onClick={(e) => e.stopPropagation()}>
+                {/* Display Name */}
+                <div className="group/input">
+                    <label className="text-[9px] font-bold uppercase tracking-widest opacity-40 block mb-2 transition-opacity group-focus-within/input:opacity-80">Display Name</label>
+                    <input
+                        type="text"
+                        value={modelConfigForm.label}
+                        onChange={(e) => setModelConfigForm({ ...modelConfigForm, label: e.target.value })}
+                        placeholder="Enter a friendly label name"
+                        className={`w-full px-3 py-2.5 text-xs rounded-xl border-2 transition-all focus:outline-none focus:ring-0 ${isDarkMode ? 'bg-transparent border-gray-600 focus:border-blue-500/50 text-white placeholder-gray-600' : 'bg-white border-gray-200 focus:border-blue-500 placeholder-gray-400'}`}
+                    />
+                </div>
+
+                {/* RAW JSON Configuration */}
+                <div>
+                    <div className="flex justify-between items-center mb-2">
+                        <label className="text-[9px] font-bold uppercase tracking-widest opacity-40">
+                            Configuration (JSON)
+                        </label>
+                        {jsonError && (
+                            <span className="text-[9px] text-red-400 font-bold bg-red-500/10 px-2 py-0.5 rounded">{jsonError}</span>
+                        )}
+                    </div>
+                    <div className={`relative rounded-xl border-2 overflow-hidden transition-colors ${isDarkMode ? 'bg-black/30 border-gray-700 focus-within:border-emerald-500/50' : 'bg-white border-gray-200 focus-within:border-emerald-500'}`}>
+                        <textarea
+                            value={modelConfigForm.jsonConfig}
+                            onChange={(e) => handleJsonChange(e.target.value)}
+                            className={`w-full p-3 h-32 text-[10px] font-mono leading-relaxed bg-transparent border-none focus:outline-none custom-scrollbar resize-y ${isDarkMode ? 'text-emerald-400' : 'text-gray-800'}`}
+                            placeholder='{ "temperature": 0.7, ... }'
+                            spellCheck={false}
+                        />
+                    </div>
+                    <p className="text-[9px] opacity-40 mt-2 leading-relaxed">
+                        Advanced users can edit raw parameters like temperature and tools directly.
+                    </p>
+                </div>
+
+                {/* Action Buttons */}
+                <div className="flex gap-3">
+                    <button
+                        onClick={handleCancelEdit}
+                        className={`flex-1 h-10 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all border ${isDarkMode ? 'border-gray-700 hover:bg-white/5 text-gray-400' : 'border-gray-200 hover:bg-black/5 text-gray-500'}`}
+                    >
+                        Cancel
+                    </button>
+                    <button
+                        onClick={() => handleSaveModelConfig(modelId)}
+                        disabled={!!jsonError}
+                        className={`flex-[2] h-10 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all shadow-lg flex items-center justify-center gap-2 ${jsonError
+                            ? 'bg-gray-500/20 text-gray-500 cursor-not-allowed'
+                            : (isDarkMode
+                                ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-500/20'
+                                : 'bg-emerald-500 hover:bg-emerald-400 text-white shadow-emerald-500/20'
+                            )
+                            } hover:scale-[1.01] active:scale-[0.99]`}
+                    >
+                        {isUpdate ? 'Update Configuration' : 'Add to Callable Models'}
+                    </button>
+                </div>
+            </div>
+        );
+    };
 
     return (
         <div
@@ -323,7 +410,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             className={`absolute bottom-full left-0 mb-4 rounded-3xl border shadow-2xl w-[90vw] min-w-[600px] max-w-[850px] h-[80vh] min-h-[450px] max-h-[650px] flex overflow-hidden origin-bottom-left animate-in zoom-in-95 duration-200 z-50 ${modalClass}`}
         >
             {/* Left Sidebar */}
-            <div className={`w-[185px] flex flex-col p-3 border-r flex-shrink-0 ${isDarkMode ? 'border-white/5 bg-black/20' : 'border-gray-100 bg-gray-50/50'}`}>
+            <div className={`w-[185px] flex flex-col p-3 border-r flex-shrink-0 ${isDarkMode ? 'border-white/5 bg-black/20' : 'border-gray-200 text-gray-800 backdrop-blur-2xl ring-1 ring-black/5'}`}>
                 <div className="text-[10px] font-bold mb-4 px-3 pt-2 opacity-40 uppercase tracking-widest">
                     Settings
                 </div>
@@ -480,19 +567,26 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                                 <div className="space-y-3">
                                     {Object.entries(providerConfigs).map(([provider, config]) =>
                                         (config as ProviderConfig).models.map((model, index) => (
-                                            <ModelListItem
-                                                key={`${provider}-${model.value}`}
-                                                provider={provider}
-                                                model={model}
-                                                index={index}
-                                                isDarkMode={isDarkMode}
-                                                draggedModelItem={draggedModelItem}
-                                                handleDragStart={handleDragStart}
-                                                handleModelDragOver={handleModelDragOver}
-                                                handleDropModel={handleDropModel}
-                                                handleDragEnd={handleDragEnd}
-                                                handleDeleteModel={handleDeleteModel}
-                                            />
+                                            <React.Fragment key={model.id}>
+                                                <ModelListItem
+                                                    provider={provider}
+                                                    model={model}
+                                                    index={index}
+                                                    isDarkMode={isDarkMode}
+                                                    draggedModelItem={draggedModelItem}
+                                                    handleDragStart={handleDragStart}
+                                                    handleModelDragOver={handleModelDragOver}
+                                                    handleDropModel={handleDropModel}
+                                                    handleDragEnd={handleDragEnd}
+                                                    handleDeleteModel={handleDeleteModel}
+                                                    onEdit={() => handleEditModel(provider as ProviderType, model)}
+                                                />
+                                                {editingModelConfigId === model.id && (
+                                                    <div className="mb-4">
+                                                        {renderModelConfigEditor(model.id, true)}
+                                                    </div>
+                                                )}
+                                            </React.Fragment>
                                         ))
                                     )}
                                 </div>
@@ -609,7 +703,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                             {/* Manual Model Add Section */}
                             <div className={`p-3 rounded-xl border-2 border-dashed flex flex-col gap-3 ${isDarkMode ? 'bg-black/20 border-gray-800' : 'bg-gray-50 border-gray-200'}`}>
                                 <div className="flex items-center justify-between">
-                                    <h4 className="text-[9px] font-bold uppercase tracking-widest opacity-40">Add Model Manually</h4>
+                                    <h4 className="text-[9px] font-bold uppercase tracking-widest opacity-40 mb-2">Add Model Manually</h4>
                                     <span className="text-[8px] opacity-30 italic">Useful for non-listable models</span>
                                 </div>
                                 <div className="flex gap-2">
@@ -688,64 +782,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                                         )}
 
                                         {expandedModelId === model.id && (
-                                            <div className={`mt-3 pt-3 border-t text-[10px] space-y-4 animate-in slide-in-from-top-2 ${isDarkMode ? 'border-gray-700' : 'border-gray-100'}`} onClick={(e) => e.stopPropagation()}>
-
-                                                {/* Inline Configuration Form */}
-                                                <div className={`p-5 rounded-2xl border flex flex-col gap-5 shadow-sm ${isDarkMode ? 'bg-black/20 border-gray-700' : 'bg-gray-50 border-gray-200'}`}>
-
-                                                    {/* Display Name */}
-                                                    <div className="group/input">
-                                                        <label className="text-[9px] font-bold uppercase tracking-widest opacity-40 block mb-2 transition-opacity group-focus-within/input:opacity-80">Display Name</label>
-                                                        <input
-                                                            type="text"
-                                                            value={modelConfigForm.label}
-                                                            onChange={(e) => setModelConfigForm({ ...modelConfigForm, label: e.target.value })}
-                                                            placeholder="Enter a friendly label name"
-                                                            className={`w-full px-3 py-2.5 text-xs rounded-xl border-2 transition-all focus:outline-none focus:ring-0 ${isDarkMode ? 'bg-transparent border-gray-600 focus:border-blue-500/50 text-white placeholder-gray-600' : 'bg-white border-gray-200 focus:border-blue-500 placeholder-gray-400'}`}
-                                                        />
-                                                    </div>
-
-                                                    {/* RAW JSON Configuration */}
-                                                    <div>
-                                                        <div className="flex justify-between items-center mb-2">
-                                                            <label className="text-[9px] font-bold uppercase tracking-widest opacity-40">
-                                                                Configuration (JSON)
-                                                            </label>
-                                                            {jsonError && (
-                                                                <span className="text-[9px] text-red-400 font-bold bg-red-500/10 px-2 py-0.5 rounded">{jsonError}</span>
-                                                            )}
-                                                        </div>
-                                                        <div className={`relative rounded-xl border-2 overflow-hidden transition-colors ${isDarkMode ? 'bg-black/30 border-gray-700 focus-within:border-emerald-500/50' : 'bg-white border-gray-200 focus-within:border-emerald-500'}`}>
-                                                            <textarea
-                                                                value={modelConfigForm.jsonConfig}
-                                                                onChange={(e) => handleJsonChange(e.target.value)}
-                                                                className={`w-full p-3 h-32 text-[10px] font-mono leading-relaxed bg-transparent border-none focus:outline-none custom-scrollbar resize-y ${isDarkMode ? 'text-emerald-400' : 'text-gray-800'}`}
-                                                                placeholder='{ "temperature": 0.7, ... }'
-                                                                spellCheck={false}
-                                                            />
-                                                        </div>
-                                                        <p className="text-[9px] opacity-40 mt-2 leading-relaxed">
-                                                            Advanced users can edit raw parameters like temperature and tools directly.
-                                                        </p>
-                                                    </div>
-
-                                                    {/* Action Button */}
-                                                    <button
-                                                        onClick={() => handleSaveModelConfig(model.id)}
-                                                        disabled={!!jsonError}
-                                                        className={`w-full h-10 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all shadow-lg flex items-center justify-center gap-2 ${jsonError
-                                                            ? 'bg-gray-500/20 text-gray-500 cursor-not-allowed'
-                                                            : (isDarkMode
-                                                                ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-500/20'
-                                                                : 'bg-emerald-500 hover:bg-emerald-400 text-white shadow-emerald-500/20'
-                                                            )
-                                                            } hover:scale-[1.01] active:scale-[0.99]`}
-                                                    >
-                                                        {providerConfigs[selectedProvider].models.some(m => m.value === model.id) ? 'Update Configuration' : 'Add to Callable Models'}
-                                                    </button>
-                                                </div>
-
-                                            </div>
+                                            renderModelConfigEditor(model.id, !!editingModelConfigId)
                                         )}
                                     </div>
                                 ))

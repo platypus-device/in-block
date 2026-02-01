@@ -1,6 +1,7 @@
 
 import React from 'react';
 import { ModelConfig, ProviderType } from '../../types';
+import { Trash2, Edit3, GripVertical } from 'lucide-react';
 
 interface ModelListItemProps {
     provider: string;
@@ -12,7 +13,8 @@ interface ModelListItemProps {
     handleModelDragOver: (e: React.DragEvent) => void;
     handleDropModel: (e: React.DragEvent, targetProvider: ProviderType, targetIndex: number) => void;
     handleDragEnd: () => void;
-    handleDeleteModel: (provider: ProviderType, modelValue: string) => void;
+    handleDeleteModel: (provider: ProviderType, modelId: string) => void;
+    onEdit?: () => void;
 }
 
 export const ModelListItem: React.FC<ModelListItemProps> = ({
@@ -25,7 +27,8 @@ export const ModelListItem: React.FC<ModelListItemProps> = ({
     handleModelDragOver,
     handleDropModel,
     handleDragEnd,
-    handleDeleteModel
+    handleDeleteModel,
+    onEdit
 }) => {
     const renderConfigParams = (config: any) => {
         const params: { key: string, value?: string }[] = [];
@@ -81,6 +84,7 @@ export const ModelListItem: React.FC<ModelListItemProps> = ({
                 }`}
         >
             <div className="flex items-center gap-3 flex-1 min-w-0">
+                <GripVertical className="w-4 h-4 opacity-20 group-hover:opacity-40" />
                 <div className="min-w-0 flex flex-col gap-1">
                     <div className="flex items-center gap-2">
                         <div className="text-xs font-bold truncate">{model.label}</div>
@@ -96,16 +100,30 @@ export const ModelListItem: React.FC<ModelListItemProps> = ({
                 </div>
             </div>
 
-            <button
-                onClick={(e) => {
-                    e.stopPropagation();
-                    handleDeleteModel(provider as ProviderType, model.value);
-                }}
-                onMouseDown={(e) => e.stopPropagation()}
-                className="px-2.5 py-1.5 text-[9px] font-bold text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded-lg transition-all cursor-pointer uppercase tracking-wide opacity-60 group-hover:opacity-100"
-            >
-                Delete
-            </button>
+            <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                {onEdit && (
+                    <button
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            onEdit();
+                        }}
+                        className={`p-2 rounded-lg transition-colors ${isDarkMode ? 'hover:bg-blue-500/20 text-blue-400' : 'hover:bg-blue-50 text-blue-600'}`}
+                        title="Edit Configuration"
+                    >
+                        <Edit3 className="w-3.5 h-3.5" />
+                    </button>
+                )}
+                <button
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        handleDeleteModel(provider as ProviderType, model.id);
+                    }}
+                    className={`p-2 rounded-lg transition-colors ${isDarkMode ? 'hover:bg-red-500/20 text-red-400' : 'hover:bg-red-50 text-red-500'}`}
+                    title="Delete Model"
+                >
+                    <Trash2 className="w-3.5 h-3.5" />
+                </button>
+            </div>
         </div>
     );
 };
