@@ -65,6 +65,7 @@ export const NodeItem: React.FC<NodeItemProps> = React.memo(({
     const nodeRef = useRef<HTMLDivElement>(null);
     const contentWrapperRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const virtualIdRef = useRef(uuidv4());
 
     const lastHeight = useRef<number>(node.height || 0);
 
@@ -129,13 +130,18 @@ export const NodeItem: React.FC<NodeItemProps> = React.memo(({
             }
         }
 
+        // Check for collision with current virtual ID
+        if (parts.some(p => p.id === virtualIdRef.current)) {
+            virtualIdRef.current = uuidv4();
+        }
+
         if (parts.length === 0) {
-            parts.push({ id: 'empty', type: 'text', content: '' });
+            parts.push({ id: virtualIdRef.current, type: 'text', content: '' });
         } else {
             // Ensure trailing text part for user input
             const lastPart = parts[parts.length - 1];
             if (lastPart.type !== 'text' || (lastPart.type === 'text' && lastPart.content && lastPart.content.trim().length > 0)) {
-                parts.push({ id: 'virtual-trailing-text', type: 'text', content: '' });
+                parts.push({ id: virtualIdRef.current, type: 'text', content: '' });
             }
         }
         return parts;
@@ -187,27 +193,35 @@ export const NodeItem: React.FC<NodeItemProps> = React.memo(({
         };
 
         loadImages();
+    }, [displayParts]);
 
+    // Cleanup all on unmount
+    useEffect(() => {
         return () => {
-            // Cleanup all on unmount
             Object.values(objectUrlsRef.current).forEach(url => {
                 if (typeof url === 'string') URL.revokeObjectURL(url);
             });
             objectUrlsRef.current = {};
         };
+    }, []);
+
+    // Track preview URLs to revoke them only on unmount
+    const previewUrlsRef = useRef<Set<string>>(new Set());
+    useEffect(() => {
+        displayParts.forEach((p: any) => {
+            if (p.__previewUrl) previewUrlsRef.current.add(p.__previewUrl);
+        });
     }, [displayParts]);
 
-    // Revoke transient preview URLs when parts change or on unmount to avoid leaking object URLs
+    // Cleanup preview URLs on unmount
     useEffect(() => {
-        const prevPreviewUrls = displayParts
-            .map((p: any) => p.__previewUrl as string)
-            .filter(Boolean);
         return () => {
-            for (const pv of prevPreviewUrls) {
-                try { URL.revokeObjectURL(pv); } catch (e) { /* ignore */ }
-            }
+            previewUrlsRef.current.forEach(url => {
+                try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ }
+            });
+            previewUrlsRef.current.clear();
         };
-    }, [displayParts]);
+    }, []);
 
     // Reset manual resize lock if content is totally cleared
     useEffect(() => {
@@ -247,6 +261,11 @@ export const NodeItem: React.FC<NodeItemProps> = React.memo(({
         e.dataTransfer.effectAllowed = 'move';
         // Set some data to make it work in all browsers
         e.dataTransfer.setData('text/plain', `part-${index}`);
+
+        const part = displayParts[index];
+        if (part && part.type === 'text') {
+            e.dataTransfer.setData('application/x-block-content', part.content);
+        }
     };
 
     const handlePartDragOver = (e: React.DragEvent, index: number) => {
@@ -269,7 +288,7 @@ export const NodeItem: React.FC<NodeItemProps> = React.memo(({
         }
 
         const newParts = [...displayParts]
-            .filter(p => p.id !== 'virtual-trailing-text' && p.id !== 'empty');
+            .filter(p => p.id !== 'virtual-trailing-text' && p.id !== 'empty' && p.id !== virtualIdRef.current);
         
         // Only reorder if indices are valid for non-virtual parts
         if (draggedPartIndex < newParts.length && targetIndex < newParts.length) {
@@ -329,7 +348,7 @@ export const NodeItem: React.FC<NodeItemProps> = React.memo(({
                                 newParts.push({ id: uuidv4(), type: 'text', content: '' });
                             }
 
-                            const filtered = newParts.filter(p => p.id !== 'virtual-trailing-text' && p.id !== 'empty');
+                            const filtered = newParts.filter(p => p.id !== 'virtual-trailing-text' && p.id !== 'empty' && p.id !== virtualIdRef.current);
                             const fullText = filtered.filter((p: any) => p.type === 'text').map((p: any) => p.content).join('\n');
                             onUpdateConfig && onUpdateConfig(node.id, { 
                                 parts: filtered,
@@ -340,7 +359,7 @@ export const NodeItem: React.FC<NodeItemProps> = React.memo(({
                             // Append to end if no specific part index (general upload/paste)
                             const currentParts = [...displayParts].filter(p => {
                                 // Only remove virtual/empty parts if they are truly empty
-                                if (p.id === 'virtual-trailing-text' || p.id === 'empty') {
+                                if (p.id === 'virtual-trailing-text' || p.id === 'empty' || p.id === virtualIdRef.current) {
                                     return p.content && p.content.trim().length > 0;
                                 }
                                 return true;
@@ -392,7 +411,7 @@ export const NodeItem: React.FC<NodeItemProps> = React.memo(({
                                 const newParts = [...displayParts]
                                     .filter(p => {
                                         // Only remove virtual/empty parts if they are truly empty
-                                        if (p.id === 'virtual-trailing-text' || p.id === 'empty') {
+                                        if (p.id === 'virtual-trailing-text' || p.id === 'empty' || p.id === virtualIdRef.current) {
                                             return p.content && p.content.trim().length > 0;
                                         }
                                         return true;
@@ -434,10 +453,10 @@ export const NodeItem: React.FC<NodeItemProps> = React.memo(({
 
     const handleTogglePartCollapse = (index: number) => {
         const part = displayParts[index];
-        if (part.id === 'empty' || part.id === 'virtual-trailing-text') return;
+        if (part.id === 'empty' || part.id === 'virtual-trailing-text' || part.id === virtualIdRef.current) return;
         
         const updatedParts = displayParts.map((p, i) => i === index ? { ...p, collapsed: !p.collapsed } : p);
-        const realParts = updatedParts.filter(p => p.id !== 'virtual-trailing-text' && p.id !== 'empty');
+        const realParts = updatedParts.filter(p => p.id !== 'virtual-trailing-text' && p.id !== 'empty' && p.id !== virtualIdRef.current);
         
         onUpdateConfig && onUpdateConfig(node.id, { parts: realParts });
     };
@@ -744,23 +763,23 @@ export const NodeItem: React.FC<NodeItemProps> = React.memo(({
 
                                 return (
                                     <div
-                                        key={part.id || index}
-                                        draggable={!isInactive && part.id !== 'virtual-trailing-text' && part.id !== 'empty' && isCollapsed}
-                                        onDragStart={(e) => handlePartDragStart(e, index)}
-                                        onDragOver={(e) => handlePartDragOver(e, index)}
-                                        onDragLeave={() => setDragOverIndex(null)}
-                                        onDrop={(e) => handlePartDrop(e, index)}
-                                        onDragEnd={handlePartDragEnd}
-                                        className={`relative group/part transition-all ${dropIndicatorClass} ${dragOverClass} hover:bg-black/5 dark:hover:bg-white/10 rounded-xl px-2 py-2 border-l-2 border-transparent hover:border-blue-500/30 mb-1 last:mb-0 w-full`}
-                                    >
-                                        {/* Actions for Part - Sticky Header */}
+                                    key={part.id || index}
+                                    draggable={!isInactive && part.id !== 'virtual-trailing-text' && part.id !== 'empty' && part.id !== virtualIdRef.current && isCollapsed}
+                                    onDragStart={(e) => handlePartDragStart(e, index)}
+                                    onDragOver={(e) => handlePartDragOver(e, index)}
+                                    onDragLeave={() => setDragOverIndex(null)}
+                                    onDrop={(e) => handlePartDrop(e, index)}
+                                    onDragEnd={handlePartDragEnd}
+                                    className={`relative group/part transition-all ${dropIndicatorClass} ${dragOverClass} hover:bg-black/5 dark:hover:bg-white/10 rounded-xl px-2 py-2 border-l-2 border-transparent hover:border-blue-500/30 mb-1 last:mb-0 w-full`}
+                                >
+                                    {/* Actions for Part - Sticky Header */}
                                         <div className={!isCollapsed 
                                             ? "sticky top-2 right-0 ml-auto w-fit h-0 overflow-visible z-20" 
                                             : "absolute top-1/2 right-2 -translate-y-1/2 z-20"
                                         }>
                                             <div className={`flex items-center gap-1 opacity-0 group-hover/part:opacity-100 transition-all duration-200 ${!isCollapsed ? 'absolute right-2 top-0' : ''}`}>
                                                 {/* Collapse Toggle */}
-                                                {part.id !== 'virtual-trailing-text' && part.id !== 'empty' && (
+                                                {part.id !== 'virtual-trailing-text' && part.id !== 'empty' && part.id !== virtualIdRef.current && (
                                                     <button
                                                         onClick={(e) => {
                                                             e.stopPropagation();
@@ -779,13 +798,13 @@ export const NodeItem: React.FC<NodeItemProps> = React.memo(({
                                                 )}
 
                                                 {/* Delete Button for Text Part */}
-                                                {(!isInactive && part.id !== 'virtual-trailing-text' && part.id !== 'empty') && (
+                                                {(!isInactive && part.id !== 'virtual-trailing-text' && part.id !== 'empty' && part.id !== virtualIdRef.current) && (
                                                     <button
                                                         onClick={(e) => {
                                                             e.stopPropagation();
                                                             const filtered = displayParts.filter((_, i) => i !== index)
                                                                 .filter(p => {
-                                                                    if (p.id === 'virtual-trailing-text' || p.id === 'empty') {
+                                                                    if (p.id === 'virtual-trailing-text' || p.id === 'empty' || p.id === virtualIdRef.current) {
                                                                         return p.content && p.content.trim().length > 0;
                                                                     }
                                                                     return true;
@@ -839,7 +858,11 @@ export const NodeItem: React.FC<NodeItemProps> = React.memo(({
                                                         return p;
                                                     });
                                                     
-                                                    const partsToSave = updatedParts.filter(p => p.id !== 'virtual-trailing-text' && p.id !== 'empty');
+                                                    const partsToSave = updatedParts.filter(p => 
+                                                        p.id !== 'virtual-trailing-text' && 
+                                                        p.id !== 'empty' && 
+                                                        !(p.id === virtualIdRef.current && p.content === '')
+                                                    );
                                                     const fullText = partsToSave.filter((p: any) => p.type === 'text').map((p: any) => p.content).join('\n');
                                                     
                                                     onUpdateConfig && onUpdateConfig(node.id, { 
@@ -853,6 +876,15 @@ export const NodeItem: React.FC<NodeItemProps> = React.memo(({
                                                 className={`w-full bg-transparent ${textColor} text-sm font-normal leading-relaxed resize-none focus:outline-none select-text cursor-text ${placeholderColor} overflow-hidden whitespace-pre-wrap break-words min-w-0 pr-8`}
                                                 rows={1}
                                                 onMouseDown={(e) => e.stopPropagation()}
+                                                onDragStart={(e) => {
+                                                    e.stopPropagation();
+                                                    const target = e.target as HTMLTextAreaElement;
+                                                    const selectedText = target.value.substring(target.selectionStart, target.selectionEnd);
+                                                    if (selectedText) {
+                                                        e.dataTransfer.setData('text/plain', selectedText);
+                                                        e.dataTransfer.effectAllowed = 'copyMove';
+                                                    }
+                                                }}
                                                 onFocus={() => {
                                                     setIsFocused(true);
                                                     if (onStartEdit) onStartEdit();
@@ -872,7 +904,11 @@ export const NodeItem: React.FC<NodeItemProps> = React.memo(({
                                     </div>
                                 );
                             } else if (part.type === 'image') {
-                                const url = (part as any).__previewUrl || (part.imageId ? imageUrls[part.imageId] : part.content);
+                                // Prioritize loaded DB image over preview URL to ensure stability
+                                const url = (part.imageId && imageUrls[part.imageId]) 
+                                    ? imageUrls[part.imageId] 
+                                    : ((part as any).__previewUrl || part.content);
+                                
                                 const isDraggingPart = draggedPartIndex === index;
                                 const isDragOver = dragOverIndex === index;
                                 const dropIndicatorClass = isDraggingPart ? 'opacity-20 grayscale scale-95' : '';
@@ -928,7 +964,7 @@ export const NodeItem: React.FC<NodeItemProps> = React.memo(({
                                                                 e.stopPropagation();
                                                                 const filtered = displayParts.filter((p, i) => {
                                                                     if (i === index) return false;
-                                                                    if (p.id === 'virtual-trailing-text' || p.id === 'empty') {
+                                                                    if (p.id === 'virtual-trailing-text' || p.id === 'empty' || p.id === virtualIdRef.current) {
                                                                         return p.content && p.content.trim().length > 0;
                                                                     }
                                                                     return true;
@@ -967,7 +1003,7 @@ export const NodeItem: React.FC<NodeItemProps> = React.memo(({
                                                                 e.stopPropagation();
                                                                 const filtered = displayParts.filter((p, i) => {
                                                                     if (i === index) return false;
-                                                                    if (p.id === 'virtual-trailing-text' || p.id === 'empty') {
+                                                                    if (p.id === 'virtual-trailing-text' || p.id === 'empty' || p.id === virtualIdRef.current) {
                                                                         return p.content && p.content.trim().length > 0;
                                                                     }
                                                                     return true;

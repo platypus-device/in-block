@@ -82,7 +82,7 @@ const generateGeminiContent = async (
         };
 
         if (!modelConfig?.config && !requestPayload.generationConfig) {
-            requestPayload.generationConfig = { temperature: options.temperature ?? 0.7 };
+            requestPayload.generationConfig = { temperature: options.temperature ?? 1 };
         }
 
         // The @google/genai SDK (v1.38.0) generateContent expects only the payload.
@@ -134,7 +134,7 @@ const generateOpenAIContent = async (
         let body: any = {
             model: actualModel,
             messages: messages,
-            temperature: options.temperature ?? 0.7,
+            temperature: options.temperature ?? 1,
             ...modelConfig?.config
         };
 
@@ -199,7 +199,7 @@ const generateAnthropicContent = async (
             model: actualModel,
             messages: messages,
             max_tokens: 4096, // Anthropic requires max_tokens
-            temperature: options.temperature ?? 0.7,
+            temperature: options.temperature ?? 1,
             ...modelConfig?.config
         };
 

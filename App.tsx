@@ -280,6 +280,7 @@ const App: React.FC = () => {
     const [promptModal, setPromptModal] = useState<{ isOpen: boolean; content: { type: string; content: string }[] } | null>(null);
     const [renameGroupModal, setRenameGroupModal] = useState<{ isOpen: boolean; groupId: string; currentTitle: string } | null>(null);
     const [imageModal, setImageModal] = useState<string | null>(null);
+    const [imageScale, setImageScale] = useState(1);
 
     // --- File System Handle State ---
     const [fileHandle, setFileHandle] = useState<any>(null); // FileSystemFileHandle
@@ -453,6 +454,7 @@ const App: React.FC = () => {
 
     const handleViewImage = useCallback((url: string) => {
         setImageModal(url);
+        setImageScale(1);
     }, []);
 
     const handleCreateGroup = () => {
@@ -1049,6 +1051,33 @@ const App: React.FC = () => {
         // Check for File Drop
         if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
             const file = e.dataTransfer.files[0];
+
+            // Handle Text Files
+            if (file.type === 'text/plain' || file.name.endsWith('.txt') || file.name.endsWith('.md') || file.name.endsWith('.json') || file.name.endsWith('.js') || file.name.endsWith('.ts') || file.name.endsWith('.tsx')) {
+                saveHistory();
+                const pos = getCanvasPos(e.clientX, e.clientY, offset, scale);
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    if (event.target?.result) {
+                        const content = event.target.result as string;
+                        const newNode: NodeData = {
+                            id: uuidv4(),
+                            type: 'text',
+                            source: 'user',
+                            content: content,
+                            position: { x: pos.x - NODE_WIDTH / 2, y: pos.y - 75 },
+                            width: NODE_WIDTH,
+                            height: 150,
+                            ports: [uuidv4()],
+                            model: defaultModel
+                        };
+                        setNodes(prev => [...prev, newNode]);
+                    }
+                };
+                reader.readAsText(file);
+                return;
+            }
+
             if (file.type.startsWith('image/')) {
                 saveHistory();
                 const pos = getCanvasPos(e.clientX, e.clientY, offset, scale);
@@ -1123,6 +1152,24 @@ const App: React.FC = () => {
                 position: { x: pos.x - NODE_WIDTH / 2, y: pos.y - 75 },
                 width: NODE_WIDTH,
                 height: 250,
+                ports: [uuidv4()],
+                model: defaultModel
+            };
+            setNodes(prev => [...prev, newNode]);
+            return;
+        }
+
+        const internalContent = e.dataTransfer.getData('application/x-block-content');
+        if (internalContent) {
+            const pos = getCanvasPos(e.clientX, e.clientY, offset, scale);
+            const newNode: NodeData = {
+                id: uuidv4(),
+                type: 'text',
+                source: 'user',
+                content: internalContent,
+                position: { x: pos.x - NODE_WIDTH / 2, y: pos.y - 75 },
+                width: NODE_WIDTH,
+                height: 150,
                 ports: [uuidv4()],
                 model: defaultModel
             };
@@ -1979,12 +2026,18 @@ const App: React.FC = () => {
                 <div
                     className="absolute inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-md animate-in fade-in duration-200"
                     onClick={() => setImageModal(null)}
+                    onWheel={(e) => {
+                        e.stopPropagation();
+                        const delta = e.deltaY * -0.001;
+                        setImageScale(prev => Math.max(0.1, Math.min(prev + delta, 5)));
+                    }}
                 >
                     <div className="relative max-w-[95vw] max-h-[95vh] flex flex-col items-center justify-center p-2 outline-none">
                         <img
                             src={imageModal}
                             alt="Full View"
-                            className="max-w-full max-h-[90vh] object-contain rounded-lg shadow-2xl"
+                            className="max-w-full max-h-[90vh] object-contain rounded-lg shadow-2xl transition-transform duration-100 ease-out"
+                            style={{ transform: `scale(${imageScale})` }}
                             onClick={(e) => e.stopPropagation()}
                         />
                         <button
